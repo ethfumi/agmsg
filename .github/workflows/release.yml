@@ -55,12 +55,20 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '22'
-          registry-url: 'https://registry.npmjs.org'
+        # Intentionally NOT setting `registry-url` — that injects a
+        # `_authToken=${NODE_AUTH_TOKEN}` line into a generated .npmrc and
+        # sets NODE_AUTH_TOKEN to a placeholder. npm then sees a non-empty
+        # token and skips the Trusted Publisher OIDC exchange, ending in a
+        # 404 from registry.npmjs.org. With no registry-url, npm uses its
+        # default registry and falls through to OIDC.
 
       - name: Upgrade npm for Trusted Publisher OIDC
         # npm CLI >= 11.5.1 picks up the GitHub OIDC token automatically and
         # exchanges it with npmjs.com. Node 22's bundled npm (10.x) doesn't.
-        run: npm install -g npm@latest
+        run: |
+          npm install -g npm@latest
+          hash -r
+          npm --version
 
       - name: Publish to npm
         env:
