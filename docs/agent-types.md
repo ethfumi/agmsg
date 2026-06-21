@@ -5,26 +5,30 @@ copilot, opencode — and each is described by a small **manifest** so that the 
 of agmsg (detection, the join whitelist, spawn, and delivery routing) discovers it
 from data instead of hardcoded `case` arms.
 
-Adding a type is a **manifest + a command template**, not an edit across
-`whoami.sh`, `join.sh`, `spawn.sh`, and `delivery.sh`.
+Adding a type is a **manifest + a command template** (plus an optional
+`_delivery.sh` plug for bespoke delivery), not an edit across `whoami.sh`,
+`join.sh`, `spawn.sh`, and `delivery.sh`.
 
 ## The manifest
 
-Each type has `types/<name>/type.conf` — read-only `key=value` **data**. agmsg
-reads it with a small per-key reader; it is **never `source`d**, so a manifest
-cannot execute code. Multi-value keys are whitespace-separated.
+Each type has `scripts/drivers/types/<name>/type.conf` — read-only `key=value`
+**data**. agmsg reads it with a small per-key reader; it is **never `source`d**, so
+a manifest cannot execute code. Multi-value keys are whitespace-separated.
 
 | key | required | meaning |
 |---|---|---|
 | `name` | yes | the type name (matches the directory) |
-| `template` | yes | the `/agmsg` command template in `templates/` (becomes `SKILL.md`) |
+| `template` | yes | the `/agmsg` command template filename, relative to the type dir (e.g. `template.md`); becomes `SKILL.md` |
 | `detect` | — | env-var names whose presence selects this type. `explicit` = never auto-detected from the environment |
 | `detect_proc` | — | parent-process-name glob patterns that select this type (e.g. `codex codex-*`) |
 | `cli` | spawnable types | the launch binary |
 | `spawnable` | — | `yes` if `spawn.sh` can launch this type |
 | `spawn` | — | a `.mjs` node-launcher (beside the manifest) `spawn.sh` runs via Node; also marks the type spawnable |
 | `hooks_file` | yes | project-relative delivery hooks file (e.g. `.codex/hooks.json`) |
-| `monitor` | — | `yes` if the type exposes a Monitor tool; `spawn` skips the readiness wait when `no` |
+| `monitor` | — | `yes` if the type exposes a native Monitor tool; `spawn` skips the readiness wait when `no` |
+| `delivery_modes` | — | space-separated delivery modes the type's CLI accepts (e.g. `monitor turn off`); `delivery.sh`'s gate rejects anything else. Defaults to `monitor turn both off` when omitted |
+| `stop_output` | — | output protocol for the Stop/turn inbox check — `json` (codex, copilot) vs. plain text (default) |
+| `hook_windows_wrap` | — | `yes` if JSON hook entries also need a Windows-native `commandWindows` variant (codex) |
 
 > The reader does not fail-fast: an omitted key reads as the empty string, so
 > "required" above means "needed for the type to actually work", not "validated at
@@ -50,10 +54,14 @@ cannot execute code. Multi-value keys are whitespace-separated.
 
 ### Delivery
 
-`hooks_file=` is the per-project file delivery hooks are written into. The hook
-*format* (settings JSON vs. rule markdown vs. …) is still per-type code in
-`delivery.sh` (`apply_settings_*`); the manifest drives the file **path** and the
-allowed modes.
+`hooks_file=` is the per-project file delivery hooks are written into, and
+`delivery_modes=` declares which modes the type accepts (the central gate in
+`delivery.sh` rejects the rest). The hook *format* lives in a **Template Method**:
+`delivery.sh` defines the default behavior (JSON event-hooks) and a type's optional
+`scripts/drivers/types/<name>/_delivery.sh` plug overrides any of
+`agmsg_delivery_apply` / `on_enable` / `on_disable` / `status`. Rule-file types
+(gemini, antigravity, …) delegate to the shared `rulefile_apply`; codex's plug adds
+its bridge/shim lifecycle. No per-type `case` arms remain in `delivery.sh`.
 
 ### Node-launcher types (external add-ons)
 
@@ -96,11 +104,14 @@ instance `scripts/drivers/types/codex/type.conf`:
 
 ```
 name=codex
-template=cmd.codex.md
+template=template.md
 cli=codex
 spawnable=yes
 detect=CODEX_SANDBOX CODEX_THREAD_ID
 detect_proc=codex codex-*
 hooks_file=.codex/hooks.json
 monitor=no
+stop_output=json
+hook_windows_wrap=yes
+delivery_modes=monitor turn off
 ```
