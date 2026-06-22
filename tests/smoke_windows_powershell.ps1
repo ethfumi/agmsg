@@ -52,6 +52,10 @@ $projectMulti = Join-Path $testRoot 'project-multi'
 
 try {
     New-Item -ItemType Directory -Force -Path $scriptsDir, (Join-Path $skillDir 'db'), (Join-Path $skillDir 'teams'), $storageDir, $projectSingle, $projectBob, $projectMulti | Out-Null
+    # Recursive copy brings scripts/ including the folded scripts/drivers/types/
+    # manifests + per-type runtimes, so join.sh's type-registry validation resolves
+    # scripts/drivers/types/<name>/type.conf relative to the skill dir (the real
+    # installer ships them the same way via the single scripts/ copy in install.sh).
     Copy-Item -Recurse -Force -Path (Join-Path $RepoRoot 'scripts/*') -Destination $scriptsDir
 
     $wrapper = Join-Path $scriptsDir 'windows/agmsg.ps1'
@@ -73,7 +77,7 @@ try {
     $projectBobBash = (& $bash -lc 'cygpath -u "$1"' agmsg-path $projectBob | Out-String).Trim()
     $projectMultiBash = (& $bash -lc 'cygpath -u "$1"' agmsg-path $projectMulti | Out-String).Trim()
 
-    & $bash (Join-Path $scriptsDir 'init-db.sh') | Out-Null
+    & $bash (Join-Path (Join-Path $scriptsDir 'internal') 'init-db.sh') | Out-Null
     if ($LASTEXITCODE -ne 0) { throw "init-db failed: $LASTEXITCODE" }
     & $bash (Join-Path $scriptsDir 'join.sh') demo alice codex $projectSingleBash | Out-Null
     if ($LASTEXITCODE -ne 0) { throw "join alice failed: $LASTEXITCODE" }

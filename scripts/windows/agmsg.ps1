@@ -98,7 +98,7 @@ function Test-SqliteAvailable {
 $script:Bash = Find-GitBash
 Test-SqliteAvailable
 
-$dispatcher = Join-Path $script:ScriptsDir 'dispatch.sh'
+$dispatcher = Join-Path $PSScriptRoot 'dispatch.sh'
 if (-not (Test-Path -LiteralPath $dispatcher)) {
     throw "Missing agmsg dispatcher: $dispatcher"
 }

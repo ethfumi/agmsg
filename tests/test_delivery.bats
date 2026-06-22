@@ -172,21 +172,6 @@ settings_file() {
   [[ "$output" =~ "mode: off" ]]
 }
 
-# --- hook.sh backward compat ---
-
-@test "hook.sh on delegates to delivery set turn" {
-  bash "$SCRIPTS/hook.sh" on claude-code "$TEST_PROJECT" 2>&1
-  has_check_inbox "$(settings_file)"
-  ! has_session_start "$(settings_file)"
-}
-
-@test "hook.sh off delegates to delivery set off" {
-  bash "$SCRIPTS/hook.sh" on  claude-code "$TEST_PROJECT" 2>&1
-  bash "$SCRIPTS/hook.sh" off claude-code "$TEST_PROJECT" 2>&1
-  ! has_check_inbox "$(settings_file)"
-  ! has_session_start "$(settings_file)"
-}
-
 # --- rejects unknown mode ---
 
 @test "delivery set: rejects unknown mode" {
@@ -465,22 +450,6 @@ JSON
   echo '{"session_id":"x"}' | bash "$SCRIPTS/session-start.sh" claude-code "$TEST_PROJECT" >/dev/null
   [ -f "$TEST_SKILL_DIR/run/watch.live-session.pid" ]
   kill "$alive_pid" 2>/dev/null || true
-}
-
-# --- hook.sh deprecation notice ---
-
-@test "hook.sh on prints a deprecation notice on stderr" {
-  run bash "$SCRIPTS/hook.sh" on claude-code "$TEST_PROJECT"
-  [ "$status" -eq 0 ]
-  # Combined stderr+stdout is captured by `run` — assert the notice appears.
-  [[ "$output" =~ "deprecated" ]]
-}
-
-@test "hook.sh off prints a deprecation notice on stderr" {
-  bash "$SCRIPTS/hook.sh" on claude-code "$TEST_PROJECT" >/dev/null
-  run bash "$SCRIPTS/hook.sh" off claude-code "$TEST_PROJECT"
-  [ "$status" -eq 0 ]
-  [[ "$output" =~ "deprecated" ]]
 }
 
 # --- emit_monitor_directive idempotency ---
@@ -1273,10 +1242,12 @@ EOF
   grep -q "session-start.sh" "$hook_file"
 }
 
-@test "delivery set both (codex): rejected for bridge beta" {
+@test "delivery set both (codex): rejected by the delivery_modes gate" {
+  # codex's manifest omits 'both' (delivery_modes=monitor turn off), so the
+  # central gate in delivery.sh rejects it before any file is touched.
   run bash "$SCRIPTS/delivery.sh" set both codex "$TEST_PROJECT"
   [ "$status" -eq 1 ]
-  [[ "$output" == *"not supported for codex bridge beta"* ]]
+  [[ "$output" == *"not supported for codex"* ]]
 }
 
 
@@ -1337,4 +1308,57 @@ EOF
   [ ! -f "$TEST_SKILL_DIR/run/codex-bridge.team.alice.pid" ]
   [ ! -f "$TEST_SKILL_DIR/run/codex-bridge.team.alice.meta" ]
   kill "$bpid" 2>/dev/null || true
+}
+
+# --- hermes (manual-only: delivery_modes=off, no automatic hook) ---
+
+@test "delivery hermes: status is manual/off" {
+  run bash "$SCRIPTS/delivery.sh" status hermes "$TEST_PROJECT"
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ "mode: off" ]]
+}
+
+@test "delivery hermes: rejects automatic modes" {
+  local mode
+  for mode in turn monitor both; do
+    run bash "$SCRIPTS/delivery.sh" set "$mode" hermes "$TEST_PROJECT"
+    [ "$status" -ne 0 ]
+    [[ "$output" =~ "not supported for hermes" ]]
+    [ ! -e "$TEST_PROJECT/.hermes/agmsg.json" ]
+  done
+}
+
+@test "delivery hermes: rejects unknown mode" {
+  run bash "$SCRIPTS/delivery.sh" set bogus hermes "$TEST_PROJECT"
+  [ "$status" -ne 0 ]
+  [[ "$output" =~ "Unknown mode" ]]
+  [ ! -e "$TEST_PROJECT/.hermes/agmsg.json" ]
+}
+
+@test "delivery hermes: accepts off without writing hook config" {
+  run bash "$SCRIPTS/delivery.sh" set off hermes "$TEST_PROJECT"
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ "Delivery mode set to 'off'" ]]
+  [[ "$output" =~ "manual inbox checks only" ]]
+  [[ "$output" != *"AGMSG-DIRECTIVE"* ]]
+  [ ! -e "$TEST_PROJECT/.hermes/agmsg.json" ]
+}
+
+@test "delivery hermes: set off does not stop Claude Code watchers for the same project" {
+  mkdir -p "$TEST_SKILL_DIR/teams/myteam"
+  cat > "$TEST_SKILL_DIR/teams/myteam/config.json" <<JSON
+{"name":"myteam","agents":{"alice":{"registrations":[{"type":"claude-code","project":"$TEST_PROJECT"}]}}}
+JSON
+  AGMSG_WATCH_INTERVAL=10 bash "$SCRIPTS/watch.sh" hermes-preserve-test "$TEST_PROJECT" claude-code &
+  local watch_pid=$!
+  sleep 1
+  [ -f "$TEST_SKILL_DIR/run/watch.hermes-preserve-test.pid" ]
+
+  run bash "$SCRIPTS/delivery.sh" set off hermes "$TEST_PROJECT"
+  [ "$status" -eq 0 ]
+  run kill -0 "$watch_pid"
+  [ "$status" -eq 0 ]
+
+  kill "$watch_pid" 2>/dev/null || true
+  wait 2>/dev/null || true
 }

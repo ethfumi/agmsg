@@ -16,28 +16,28 @@ teardown() {
 }
 
 @test "codex-bridge: help exits successfully" {
-  run node "$SCRIPTS/codex-bridge.js" --help
+  run node "$TYPES/codex/codex-bridge.js" --help
   [ "$status" -eq 0 ]
   [[ "$output" =~ "Beta Codex app-server bridge" ]]
 }
 
 @test "codex-bridge: resolve-only prints the selected identity" {
   skip_on_windows "codex bridge identity resolution on Windows (#182)"
-  run node "$SCRIPTS/codex-bridge.js" --project "$PROJ" --team team --name alice --resolve-only
+  run node "$TYPES/codex/codex-bridge.js" --project "$PROJ" --team team --name alice --resolve-only
   [ "$status" -eq 0 ]
   [ "$output" = $'team\talice' ]
 }
 
 @test "codex-bridge: resolve-only rejects ambiguous identities" {
   skip_on_windows "codex bridge identity resolution on Windows (#182)"
-  run node "$SCRIPTS/codex-bridge.js" --project "$PROJ" --resolve-only
+  run node "$TYPES/codex/codex-bridge.js" --project "$PROJ" --resolve-only
   [ "$status" -eq 1 ]
   [[ "$output" =~ "multiple identities match" ]]
 }
 
 @test "codex-bridge: rejects unsupported app-server endpoints" {
   skip_on_windows "codex bridge identity resolution on Windows (#182)"
-  run node "$SCRIPTS/codex-bridge.js" --project "$PROJ" --team team --name alice --app-server http://127.0.0.1:9999
+  run node "$TYPES/codex/codex-bridge.js" --project "$PROJ" --team team --name alice --app-server http://127.0.0.1:9999
   [ "$status" -eq 1 ]
   [[ "$output" =~ "supports only unix://PATH or ws://host:port" ]]
 }
@@ -181,7 +181,7 @@ EOF
     sleep 0.1
   done
 
-  run node "$SCRIPTS/codex-bridge.js" \
+  run node "$TYPES/codex/codex-bridge.js" \
     --project "$PROJ" --team team --name alice --thread thread-existing \
     --app-server "unix://$sock" --timeout 1 --interval 1 --max-wakes 1
 
@@ -316,7 +316,7 @@ EOF
   local port
   port="$(cat "$portfile")"
 
-  run node "$SCRIPTS/codex-bridge.js" \
+  run node "$TYPES/codex/codex-bridge.js" \
     --project "$PROJ" --team team --name alice --thread thread-existing \
     --app-server "ws://127.0.0.1:$port" --timeout 1 --interval 1 --max-wakes 1
 
@@ -333,7 +333,7 @@ EOF
   mkdir -p "$TEST_SKILL_DIR/run"
   echo "$$" > "$TEST_SKILL_DIR/run/codex-bridge.team.alice.pid"
 
-  run node "$SCRIPTS/codex-bridge.js" --project "$PROJ" --team team --name alice
+  run node "$TYPES/codex/codex-bridge.js" --project "$PROJ" --team team --name alice
   [ "$status" -eq 1 ]
   [[ "$output" =~ "bridge already running" ]]
 }
@@ -396,7 +396,7 @@ rl.on("line", (line) => {
 });
 EOF
 
-  AGMSG_CODEX_APP_SERVER_CMD="node $fake" run node "$SCRIPTS/codex-bridge.js" \
+  AGMSG_CODEX_APP_SERVER_CMD="node $fake" run node "$TYPES/codex/codex-bridge.js" \
     --project "$PROJ" --team team --name alice --timeout 1 --interval 1 --max-wakes 1
 
   [ "$status" -eq 0 ]
@@ -441,7 +441,7 @@ rl.on("line", (line) => {
 });
 EOF
 
-  AGMSG_CODEX_APP_SERVER_CMD="node $fake $log" run node "$SCRIPTS/codex-bridge.js" \
+  AGMSG_CODEX_APP_SERVER_CMD="node $fake $log" run node "$TYPES/codex/codex-bridge.js" \
     --project "$PROJ" --team team --name alice --thread thread-existing --timeout 20
 
   [ "$status" -eq 0 ]
@@ -489,7 +489,7 @@ rl.on("line", (line) => {
 });
 EOF
 
-  AGMSG_CODEX_APP_SERVER_CMD="node $fake $log" run node "$SCRIPTS/codex-bridge.js" \
+  AGMSG_CODEX_APP_SERVER_CMD="node $fake $log" run node "$TYPES/codex/codex-bridge.js" \
     --project "$PROJ" --team team --name alice --thread loaded --loaded-timeout 5000 --timeout 20
 
   [ "$status" -eq 0 ]
@@ -523,7 +523,7 @@ rl.on("line", (line) => {
 });
 EOF
 
-  AGMSG_CODEX_APP_SERVER_CMD="node $fake" run node "$SCRIPTS/codex-bridge.js" \
+  AGMSG_CODEX_APP_SERVER_CMD="node $fake" run node "$TYPES/codex/codex-bridge.js" \
     --project "$PROJ" --team team --name alice --thread loaded --loaded-timeout 1500 --timeout 20
 
   [ "$status" -ne 0 ]
@@ -590,7 +590,7 @@ rl.on("line", (line) => {
 });
 EOF
 
-  AGMSG_CODEX_APP_SERVER_CMD="node $fake" run node "$SCRIPTS/codex-bridge.js" \
+  AGMSG_CODEX_APP_SERVER_CMD="node $fake" run node "$TYPES/codex/codex-bridge.js" \
     --project "$PROJ" --team team --name alice --timeout 1 --interval 1 --max-wakes 1 --inline-inbox
 
   [ "$status" -eq 0 ]
@@ -653,7 +653,7 @@ rl.on("line", (line) => {
 });
 EOF
 
-  AGMSG_CODEX_APP_SERVER_CMD="node $fake" run node "$SCRIPTS/codex-bridge.js" \
+  AGMSG_CODEX_APP_SERVER_CMD="node $fake" run node "$TYPES/codex/codex-bridge.js" \
     --project "$PROJ" --team team --name alice --timeout 1 --interval 1
 
   [ "$status" -eq 1 ]
@@ -700,7 +700,7 @@ rl.on("line", (line) => {
 });
 EOF
 
-  AGMSG_CODEX_APP_SERVER_CMD="node $fake" run node "$SCRIPTS/codex-bridge.js" \
+  AGMSG_CODEX_APP_SERVER_CMD="node $fake" run node "$TYPES/codex/codex-bridge.js" \
     --project "$PROJ" --team team --name alice --timeout 1 --interval 1 --turn-timeout 1 --max-wakes 2
 
   [ "$status" -eq 0 ]
@@ -746,7 +746,7 @@ rl.on("line", (line) => {
 });
 EOF
 
-  AGMSG_CODEX_APP_SERVER_CMD="node $fake" run node "$SCRIPTS/codex-bridge.js" \
+  AGMSG_CODEX_APP_SERVER_CMD="node $fake" run node "$TYPES/codex/codex-bridge.js" \
     --project "$PROJ" --team team --name alice --timeout 1 --interval 1 --turn-timeout 30 --max-wakes 2
 
   [ "$status" -eq 0 ]
@@ -806,7 +806,7 @@ rl.on("line", (line) => {
 });
 EOF
 
-  AGMSG_CODEX_APP_SERVER_CMD="node $fake $log" run node "$SCRIPTS/codex-bridge.js" \
+  AGMSG_CODEX_APP_SERVER_CMD="node $fake $log" run node "$TYPES/codex/codex-bridge.js" \
     --project "$PROJ" --team team --name alice --thread thread-active --timeout 1 --interval 1 --turn-timeout 30 --max-wakes 2
 
   [ "$status" -eq 0 ]              # not exit 1 from the stale-wake guard

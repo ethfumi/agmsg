@@ -26,7 +26,7 @@ powershell_bin() {
 
 @test "windows powershell launcher source does not hardcode team or agent names" {
   local launcher="$REPO_ROOT/scripts/windows/agmsg.ps1"
-  local dispatcher="$REPO_ROOT/scripts/dispatch.sh"
+  local dispatcher="$REPO_ROOT/scripts/windows/dispatch.sh"
   [ -f "$launcher" ]
   [ -f "$dispatcher" ]
   ! grep -q "AGMSG_TEAM.*emeria" "$launcher"
