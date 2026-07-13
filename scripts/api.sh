@@ -26,7 +26,8 @@ set -euo pipefail
 # Usage:
 #   api.sh get teams
 #   api.sh get teams <team> members
-#   api.sh get teams <team> messages [--agent <name>] [--limit N] [--before-id <id>]
+#   api.sh get teams <team> messages [--agent <name>] [--limit N]
+#                                         [--before-id <id> | --after-id <id>]
 #
 # Output is always JSONL — one JSON object per line, UTF-8, no
 # pretty-printing — for every resource, including `teams` (a uniform
@@ -95,12 +96,13 @@ get_members() {
 get_messages() {
   local team="$1"
   shift
-  local agent="" limit=30 before_id=""
+  local agent="" limit=30 before_id="" after_id=""
   while [ $# -gt 0 ]; do
     case "$1" in
       --agent) agent="${2:?--agent needs a value}"; shift 2 ;;
       --limit) limit="${2:?--limit needs a value}"; shift 2 ;;
       --before-id) before_id="${2:?--before-id needs a value}"; shift 2 ;;
+      --after-id) after_id="${2:?--after-id needs a value}"; shift 2 ;;
       *) echo "Unknown option: $1" >&2; exit 1 ;;
     esac
   done
@@ -108,6 +110,11 @@ get_messages() {
   # same guard history.sh uses for LIMIT.
   case "$limit" in ''|*[!0-9]*) limit=30 ;; esac
   case "$before_id" in ''|*[!0-9]*) before_id="" ;; esac
+  case "$after_id" in ''|*[!0-9]*) after_id="" ;; esac
+  if [ -n "$before_id" ] && [ -n "$after_id" ]; then
+    echo "--before-id and --after-id are mutually exclusive" >&2
+    exit 1
+  fi
 
   local db; db="$(agmsg_db_path)"
   if [ ! -f "$db" ]; then
@@ -123,6 +130,9 @@ get_messages() {
   if [ -n "$before_id" ]; then
     where="$where AND id<$before_id"
   fi
+  if [ -n "$after_id" ]; then
+    where="$where AND id>$after_id"
+  fi
 
   # Inner query takes the most recent `limit` by id DESC, outer re-sorts
   # ASC — oldest-first output, same ordering contract §2.1 of the driver
@@ -133,6 +143,14 @@ get_messages() {
   # a decimal STRING (not a JSON number) so a future UUIDv7/Redis-stream-id
   # driver doesn't change this field's JSON type — a consumer parsing id as
   # a string today needs no change once that lands.
+  # Forward polling must take the OLDEST rows after the cursor. Taking the
+  # most recent rows would silently skip messages whenever more than `limit`
+  # arrive between polls. Backward/history queries keep the existing newest-N
+  # behavior, with both paths emitting oldest-first JSONL.
+  local page_order="ORDER BY id DESC LIMIT $limit"
+  if [ -n "$after_id" ]; then
+    page_order="ORDER BY id ASC LIMIT $limit"
+  fi
   agmsg_sqlite "$db" "
     SELECT json_object(
       'type', 'message_sent',
@@ -143,7 +161,7 @@ get_messages() {
       'body', body,
       'at', created_at
     ) FROM (
-      SELECT * FROM messages WHERE $where ORDER BY id DESC LIMIT $limit
+      SELECT * FROM messages WHERE $where $page_order
     ) ORDER BY id ASC;
   "
 }

@@ -143,6 +143,27 @@ json_valid_line() {
   [ "$(json_field "$output" body)" = "one" ]
 }
 
+@test "api: get teams <team> messages --after-id pages forward without skipping" {
+  bash "$SCRIPTS/send.sh" testteam alice bob "one"
+  local cursor
+  cursor="$(json_field "$(bash "$SCRIPTS/api.sh" get teams testteam messages --limit 1)" id)"
+  bash "$SCRIPTS/send.sh" testteam alice bob "two"
+  bash "$SCRIPTS/send.sh" testteam alice bob "three"
+  bash "$SCRIPTS/send.sh" testteam alice bob "four"
+
+  run bash "$SCRIPTS/api.sh" get teams testteam messages --after-id "$cursor" --limit 2
+  [ "$status" -eq 0 ]
+  [ "$(echo "$output" | wc -l | tr -d ' ')" -eq 2 ]
+  [ "$(json_field "$(echo "$output" | sed -n 1p)" body)" = "two" ]
+  [ "$(json_field "$(echo "$output" | sed -n 2p)" body)" = "three" ]
+}
+
+@test "api: get teams <team> messages rejects before and after cursors together" {
+  run bash "$SCRIPTS/api.sh" get teams testteam messages --before-id 3 --after-id 1
+  [ "$status" -ne 0 ]
+  [[ "$output" =~ "mutually exclusive" ]]
+}
+
 @test "api: get teams <team> messages emits valid JSON for a body containing a quote" {
   bash "$SCRIPTS/send.sh" testteam alice bob "she said \"hi\""
   run bash "$SCRIPTS/api.sh" get teams testteam messages
