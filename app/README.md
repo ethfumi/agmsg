@@ -30,6 +30,42 @@ Prerequisite either way: agmsg itself installed at `~/.agents/skills/agmsg` (the
 app reads its DB and team config from there) — see the
 [main README](../README.md) for that install.
 
+## Multiple message sources
+
+The Team Room can merge the local agmsg history with one or more read-only
+agmsg installations reached over SSH. Each source keeps its own SQLite store;
+the app queries its public `api.sh` interface and never mounts, copies, or
+synchronizes `messages.db`.
+
+Add remote sources in `~/.agmsg/config/app-sources.json`:
+
+```json
+{
+  "sources": [
+    {
+      "id": "mac",
+      "label": "Mac",
+      "ssh": "you@mac.local",
+      "base": "/Users/you/.agents/skills/agmsg"
+    }
+  ]
+}
+```
+
+`id` must be unique and contain only letters, numbers, `-`, or `_`; `local` is
+reserved for the implicit local source. `base` must be an absolute remote path.
+The system `ssh` client and its existing config/agent are used with
+`BatchMode=yes`; the app does not store keys or passwords. Set
+`AGMSG_APP_SOURCES` to use a different config-file path.
+
+Messages from all sources with the selected team name are merged by timestamp
+and carry a source badge. History pagination and live cursors remain independent
+per source, so overlapping numeric SQLite ids do not collide. A remote core that
+predates `api.sh --after-id` falls back to merging its latest 100 messages on
+each poll; upgrading that core enables lossless forward-cursor polling. Remote
+members are shown for filtering but are read-only: spawning, renaming, leaving,
+and the composer continue to operate on the local source only.
+
 ## Strategic core — universal stdin-inject delivery
 
 The app **owns** each spawned agent's pseudo-terminal. When a new agmsg message
