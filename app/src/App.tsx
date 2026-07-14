@@ -1576,14 +1576,21 @@ export default function App() {
               </div>
               <ul className="members">
                 {others.map((m) => {
-                  const pane = panes.find(
-                    (candidate) =>
-                      candidate.label === m.name &&
-                      windows.some(
-                        (window) =>
-                          window.team === team && leaves(window.root).includes(candidate.id),
-                      ),
-                  );
+                  // Panes are local-only, and member names are unique per
+                  // source rather than globally: a remote source can carry a
+                  // member with the same name as a local one (e.g. claude-win
+                  // on both Windows and Mac). Matching on the name alone would
+                  // show the local pane's status on the remote twin.
+                  const pane = m.read_only
+                    ? undefined
+                    : panes.find(
+                        (candidate) =>
+                          candidate.label === m.name &&
+                          windows.some(
+                            (window) =>
+                              window.team === team && leaves(window.root).includes(candidate.id),
+                          ),
+                      );
                   const status = pane ? (paneStatus[pane.id]?.state ?? "unknown") : null;
                   return (
                     <li
