@@ -997,7 +997,7 @@ pub fn start_watcher(app: AppHandle) {
 #[cfg(test)]
 mod tests {
     use super::{
-        agmsg_base, message_sources, msys_to_native, parse_semver, shell_quote,
+        agmsg_base, message_sources, msys_to_native, parse_semver, run_script, shell_quote,
         to_bash_slashes, valid_source_id,
     };
     use serial_test::serial;
