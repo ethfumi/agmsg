@@ -43,16 +43,22 @@ import {
   type PaneRect,
   type SplitNode,
 } from "./paneTree";
+import {
+  isAfterIdUnsupported,
+  mergeMessages,
+  messageKey,
+  type MessageSource,
+  type SourceMember,
+  type SourceMessage,
+} from "./messageSources";
 import "./App.css";
 
-export type Member = { name: string; types: string[]; project: string };
-type Message = {
-  id: number;
-  team: string;
-  from: string;
-  to: string;
-  body: string;
-  created_at: string;
+export type Member = SourceMember;
+type Message = SourceMessage;
+type SourceHistory = {
+  oldestId?: string;
+  latestId?: string;
+  hasMore: boolean;
 };
 type Pane = {
   id: string;
@@ -142,10 +148,12 @@ export default function App() {
   // otherwise completes silently (the outdated banner just disappears),
   // which read as "did that actually work?" in testing.
   const [coreUpdateSucceeded, setCoreUpdateSucceeded] = useState<string | null>(null);
+  const [sources, setSources] = useState<MessageSource[]>([]);
   const [teams, setTeams] = useState<string[]>([]);
   const [team, setTeam] = useState<string>("");
   const [members, setMembers] = useState<Member[]>([]);
   const [messages, setMessages] = useState<Message[]>([]);
+  const [, setSourceHistoryState] = useState<Record<string, SourceHistory>>({});
   const [panes, setPanes] = useState<Pane[]>([]);
   const [paneStatus, setPaneStatus] = useState<PaneStatusMap>({});
   const [windows, setWindows] = useState<Window[]>([]);
@@ -270,6 +278,18 @@ export default function App() {
   renameDraftRef.current = renameDraft;
   const seq = useRef(0);
   const feedRef = useRef<HTMLDivElement>(null);
+  const sourceHistoryRef = useRef<Record<string, SourceHistory>>({});
+  const legacyRemoteSourcesRef = useRef<Set<string>>(new Set());
+  const updateSourceHistory = useCallback(
+    (updater: (current: Record<string, SourceHistory>) => Record<string, SourceHistory>) => {
+      setSourceHistoryState((current) => {
+        const next = updater(current);
+        sourceHistoryRef.current = next;
+        return next;
+      });
+    },
+    [],
+  );
   // Set right before prepending an older history page, so the scroll-to-
   // bottom effect below skips that render (loadOlderMessages restores the
   // scroll position itself instead).
@@ -305,14 +325,19 @@ export default function App() {
   }, []);
 
   // The app user = the member registered with the agmsg-app type (one per team).
-  const appUserMember = members.find((m) => m.types.includes(APP_USER_TYPE));
+  const appUserMember = members.find(
+    (m) => m.source_id === "local" && m.types.includes(APP_USER_TYPE),
+  );
   const appUser = appUserMember?.name ?? "";
   // The team's project dir (the app-user's) — new agents default into the same place.
   const teamProject = appUserMember?.project ?? "";
   // Everyone else is a spawnable/messageable agent.
   const others = members.filter((m) => !m.types.includes(APP_USER_TYPE));
+  const sendableOthers = others.filter((m) => !m.read_only);
   // The app user's own send/receive thread.
-  const myThread = messages.filter((m) => m.from === appUser || m.to === appUser);
+  const myThread = messages.filter(
+    (m) => m.source_id === "local" && (m.from === appUser || m.to === appUser),
+  );
 
   // Team-room member filter: keep a message when either party is a checked
   // member. Names not in the roster (e.g. the app-user) ride on their counterpart.
@@ -326,11 +351,28 @@ export default function App() {
   // Cozy grouping: collapse runs of consecutive messages with the same from→to
   // into one header + stacked bodies (Slack/Discord style), so short bursts stay
   // light while long messages still line up.
-  const groups: { key: number; from: string; to: string; items: Message[] }[] = [];
+  const groups: {
+    key: string;
+    source_id: string;
+    source_label: string;
+    from: string;
+    to: string;
+    items: Message[];
+  }[] = [];
   for (const m of roomMessages) {
     const last = groups[groups.length - 1];
-    if (last && last.from === m.from && last.to === m.to) last.items.push(m);
-    else groups.push({ key: m.id, from: m.from, to: m.to, items: [m] });
+    if (last && last.source_id === m.source_id && last.from === m.from && last.to === m.to) {
+      last.items.push(m);
+    } else {
+      groups.push({
+        key: messageKey(m),
+        source_id: m.source_id,
+        source_label: m.source_label,
+        from: m.from,
+        to: m.to,
+        items: [m],
+      });
+    }
   }
 
   const toggleMember = (name: string) =>
@@ -343,17 +385,55 @@ export default function App() {
   const selectAllMembers = () => setDeselected(new Set());
   const selectNoMembers = () => setDeselected(new Set(others.map((m) => m.name)));
 
-  const loadTeams = useCallback(async () => {
-    const t = await invoke<string[]>("agmsg_teams");
-    setTeams(t);
-    return t;
+  const loadSources = useCallback(async () => {
+    const loaded = await invoke<MessageSource[]>("agmsg_sources");
+    setSources(loaded);
+    return loaded;
   }, []);
 
-  const loadMembers = useCallback(async (t: string) => {
-    const m = await invoke<Member[]>("agmsg_members", { team: t });
-    setMembers(m);
-    return m;
-  }, []);
+  const loadTeams = useCallback(
+    async (activeSources: MessageSource[]) => {
+      const results = await Promise.allSettled(
+        activeSources.map((source) =>
+          invoke<string[]>("agmsg_source_teams", { sourceId: source.id }),
+        ),
+      );
+      const loaded = results.flatMap((result, index) => {
+        if (result.status === "fulfilled") return result.value;
+        console.warn("Couldn't load teams from " + activeSources[index].label + ":", result.reason);
+        return [];
+      });
+      if (activeSources.length > 0 && results.every((result) => result.status === "rejected")) {
+        throw results[0].status === "rejected" ? results[0].reason : new Error("No agmsg sources");
+      }
+      const unique = [...new Set(loaded)].sort();
+      setTeams(unique);
+      return unique;
+    },
+    [],
+  );
+
+  const loadMembers = useCallback(
+    async (t: string) => {
+      const results = await Promise.allSettled(
+        sources.map((source) =>
+          invoke<Member[]>("agmsg_source_members", { sourceId: source.id, team: t }),
+        ),
+      );
+      const loaded = results.flatMap((result, index) => {
+        if (result.status === "fulfilled") return result.value;
+        console.warn("Couldn't load members from " + sources[index].label + ":", result.reason);
+        return [];
+      });
+      loaded.sort(
+        (left, right) =>
+          left.name.localeCompare(right.name) || left.source_id.localeCompare(right.source_id),
+      );
+      setMembers(loaded);
+      return loaded;
+    },
+    [sources],
+  );
 
   // The agmsg slash-command name, for the `/<cmd> actas <name>` boot prompt.
   useEffect(() => {
@@ -422,7 +502,8 @@ export default function App() {
         } catch (err) {
           console.error(err);
         }
-        const loadedTeams = await loadTeams();
+        const loadedSources = await loadSources();
+        const loadedTeams = await loadTeams(loadedSources);
         if (loadedTeams.length === 0) setModal({ kind: "team", firstRun: true });
         else {
           const lastTeam = localStorage.getItem(LAST_TEAM_KEY);
@@ -435,7 +516,7 @@ export default function App() {
       }
     }
     boot();
-  }, [loadTeams, t]);
+  }, [loadSources, loadTeams, t]);
 
   // Tabs are per-team (see the Window type), so switching teams also swaps
   // the whole visible tab set — land on the team room rather than leaving
@@ -452,33 +533,79 @@ export default function App() {
     if (team) localStorage.setItem(LAST_TEAM_KEY, team);
   }, [team]);
 
-  // On team change: load members + the most recent history page. Prompt to
-  // add an app-user if missing.
+  // On team change: load members and one independent history page from
+  // every configured source, then merge without trimming. Keeping each
+  // source's full page is what makes per-database backward cursors lossless.
   useEffect(() => {
-    if (!team) return;
-    setDeselected(new Set()); // reset the room filter when switching teams
+    if (!team || sources.length === 0) return;
+    let cancelled = false;
+    setDeselected(new Set());
     setMessages([]);
     setHasMoreHistory(true);
-    invoke<Message[]>("agmsg_messages", { team, limit: ROOM_PAGE_SIZE })
-      .then((msgs) => {
-        setMessages(msgs);
-        setHasMoreHistory(msgs.length >= ROOM_PAGE_SIZE);
-      })
-      .catch(console.error);
+
+    async function loadInitialHistory() {
+      const results = await Promise.allSettled(
+        sources.map((source) =>
+          invoke<Message[]>("agmsg_source_messages", {
+            sourceId: source.id,
+            team,
+            limit: ROOM_PAGE_SIZE,
+          }),
+        ),
+      );
+      if (cancelled) return;
+
+      const history: Record<string, SourceHistory> = {};
+      const loaded = results.flatMap((result, index) => {
+        const source = sources[index];
+        if (result.status === "rejected") {
+          console.warn("Couldn't load messages from " + source.label + ":", result.reason);
+          history[source.id] = { hasMore: false };
+          return [];
+        }
+        const page = result.value;
+        history[source.id] = {
+          oldestId: page[0]?.id,
+          latestId: page[page.length - 1]?.id,
+          hasMore: page.length >= ROOM_PAGE_SIZE,
+        };
+        return page;
+      });
+      setMessages(mergeMessages([], loaded));
+      updateSourceHistory(() => history);
+      setHasMoreHistory(Object.values(history).some((state) => state.hasMore));
+    }
+
+    void loadInitialHistory();
     loadMembers(team)
-      .then((m) => {
-        if (!m.some((x) => x.types.includes(APP_USER_TYPE))) {
-          setModal((cur) => cur ?? { kind: "appuser" });
+      .then((loaded) => {
+        if (!loaded.some((member) => member.source_id === "local" && member.types.includes(APP_USER_TYPE))) {
+          setModal((current) => current ?? { kind: "appuser" });
         }
       })
       .catch(console.error);
-  }, [team, loadMembers]);
+
+    return () => {
+      cancelled = true;
+    };
+  }, [team, sources, loadMembers, updateSourceHistory]);
 
   // Live team-room updates; inject into a matching pane.
   useEffect(() => {
     const p = listen<Message>("agmsg-message", (e) => {
       if (e.payload.team !== team) return;
-      setMessages((prev) => [...prev, e.payload]);
+      setMessages((prev) => mergeMessages(prev, [e.payload]));
+      updateSourceHistory((current) => {
+        const local = current.local ?? { hasMore: false };
+        return {
+          ...current,
+          local: {
+            ...local,
+            oldestId: local.oldestId ?? e.payload.id,
+            latestId: e.payload.id,
+          },
+        };
+      });
       // Only inject into NON-native panes; a native (actas-booted) agent runs
       // its own agmsg monitor and would otherwise receive the message twice.
       const pane = panesRef.current.find((pn) => pn.label === e.payload.to && !pn.native);
@@ -505,7 +632,90 @@ export default function App() {
       }
     });
     return () => void p.then((u) => u());
-  }, [team, cmdName]);
+  }, [team, cmdName, updateSourceHistory]);
+
+  // Remote sources are read-only room feeds. Use a forward cursor where the
+  // core supports it and drain full pages before sleeping; older cores fall
+  // back to repeatedly merging their latest page for compatibility.
+  useEffect(() => {
+    const remoteSources = sources.filter((source) => source.read_only);
+    if (!team || remoteSources.length === 0) return;
+
+    let stopped = false;
+    let running = false;
+    const poll = async () => {
+      if (running || stopped) return;
+      running = true;
+      const mergePage = (source: MessageSource, page: Message[]) => {
+        if (page.length === 0) return;
+        setMessages((current) => mergeMessages(current, page));
+        const latestId = page[page.length - 1].id;
+        updateSourceHistory((current) => ({
+          ...current,
+          [source.id]: {
+            ...(current[source.id] ?? { hasMore: false }),
+            latestId,
+          },
+        }));
+      };
+
+      try {
+        for (const source of remoteSources) {
+          try {
+            if (legacyRemoteSourcesRef.current.has(source.id)) {
+              const page = await invoke<Message[]>("agmsg_source_messages", {
+                sourceId: source.id,
+                team,
+                limit: 100,
+              });
+              mergePage(source, page);
+              continue;
+            }
+
+            let afterId = sourceHistoryRef.current[source.id]?.latestId ?? "0";
+            for (let pageNumber = 0; pageNumber < 20 && !stopped; pageNumber += 1) {
+              const page = await invoke<Message[]>("agmsg_source_messages", {
+                sourceId: source.id,
+                team,
+                limit: 100,
+                afterId,
+              });
+              if (page.length === 0) break;
+              mergePage(source, page);
+              afterId = page[page.length - 1].id;
+              if (page.length < 100) break;
+            }
+          } catch (error) {
+            if (isAfterIdUnsupported(error)) {
+              legacyRemoteSourcesRef.current.add(source.id);
+              console.warn(
+                `${source.label} uses a legacy agmsg core; polling its latest 100 messages`,
+              );
+              const page = await invoke<Message[]>("agmsg_source_messages", {
+                sourceId: source.id,
+                team,
+                limit: 100,
+              });
+              mergePage(source, page);
+            } else {
+              console.warn(`Couldn't poll remote agmsg source ${source.label}:`, error);
+            }
+          }
+        }
+      } catch (error) {
+        console.warn("Couldn't poll remote agmsg sources:", error);
+      } finally {
+        running = false;
+      }
+    };
+
+    void poll();
+    const timer = window.setInterval(() => void poll(), 2500);
+    return () => {
+      stopped = true;
+      window.clearInterval(timer);
+    };
+  }, [team, sources, updateSourceHistory]);
 
   useEffect(() => {
     const stateListener = listen<{ id: string; state: RawState }>("agent-state", (event) => {
@@ -531,30 +741,66 @@ export default function App() {
   // height, since scrollTop stays fixed while scrollHeight grows above it).
   const loadOlderMessages = useCallback(async () => {
     if (loadingHistory || !hasMoreHistory || messages.length === 0) return;
+    const pagedSources = sources.filter((source) => {
+      const state = sourceHistoryRef.current[source.id];
+      return state?.hasMore && state.oldestId;
+    });
+    if (pagedSources.length === 0) {
+      setHasMoreHistory(false);
+      return;
+    }
+
     setLoadingHistory(true);
-    const beforeId = messages[0].id;
     const el = feedRef.current;
     const prevScrollHeight = el?.scrollHeight ?? 0;
     try {
-      const older = await invoke<Message[]>("agmsg_messages", {
-        team,
-        limit: ROOM_PAGE_SIZE,
-        beforeId,
+      const results = await Promise.allSettled(
+        pagedSources.map((source) =>
+          invoke<Message[]>("agmsg_source_messages", {
+            sourceId: source.id,
+            team,
+            limit: ROOM_PAGE_SIZE,
+            beforeId: sourceHistoryRef.current[source.id].oldestId,
+          }),
+        ),
+      );
+      const nextHistory = { ...sourceHistoryRef.current };
+      const older = results.flatMap((result, index) => {
+        const source = pagedSources[index];
+        if (result.status === "rejected") {
+          console.warn("Couldn't load older messages from " + source.label + ":", result.reason);
+          return [];
+        }
+        const page = result.value;
+        nextHistory[source.id] = {
+          ...nextHistory[source.id],
+          oldestId: page[0]?.id ?? nextHistory[source.id]?.oldestId,
+          hasMore: page.length >= ROOM_PAGE_SIZE,
+        };
+        return page;
       });
+      updateSourceHistory(() => nextHistory);
+      setHasMoreHistory(Object.values(nextHistory).some((state) => state.hasMore));
       if (older.length > 0) {
         isPrependingRef.current = true;
-        setMessages((prev) => [...older, ...prev]);
+        setMessages((current) => mergeMessages(current, older));
         requestAnimationFrame(() => {
           if (el) el.scrollTop += el.scrollHeight - prevScrollHeight;
         });
       }
-      setHasMoreHistory(older.length >= ROOM_PAGE_SIZE);
-    } catch (err) {
-      console.error(err);
+    } catch (error) {
+      console.error(error);
     } finally {
       setLoadingHistory(false);
     }
-  }, [team, messages, loadingHistory, hasMoreHistory]);
+  }, [
+    team,
+    sources,
+    messages.length,
+    loadingHistory,
+    hasMoreHistory,
+    updateSourceHistory,
+  ]);
 
   // useLayoutEffect (not useEffect): runs synchronously right after the DOM
   // updates and before the browser paints, so scrollHeight already reflects
@@ -595,6 +841,7 @@ export default function App() {
     // targetWindowId: spawn straight into an existing tab as an extra
     // side-by-side pane, instead of opening a new tab (the default).
     async (m: Member, targetWindowId?: string) => {
+      if (m.read_only) return;
       // Don't spawn a second pane for a member that's already running — just
       // focus its window (one live agent per identity).
       const existing = panesRef.current.find((p) => p.label === m.name);
@@ -884,7 +1131,7 @@ export default function App() {
         agentType: APP_USER_TYPE,
         project,
       });
-      await loadTeams();
+      await loadTeams(sources);
       setTeam(name);
       setModal(null);
     },
@@ -904,7 +1151,7 @@ export default function App() {
     async (name: string, type: string, project: string) => {
       await invoke("agmsg_join", { team, name, agentType: type, project });
       const m = await loadMembers(team);
-      const added = m.find((x) => x.name === name);
+      const added = m.find((x) => x.source_id === "local" && x.name === name);
       if (added) spawnMember(added);
       setModal(null);
     },
@@ -1101,7 +1348,7 @@ export default function App() {
                 await invoke("agmsg_update_core");
                 setCoreOutdated(null);
                 setCoreUpdateSucceeded(targetVersion);
-                await loadTeams();
+                await loadTeams(sources);
               } catch (err) {
                 console.error(err);
                 setStartupError(t("startupError.updateFailed", { error: String(err) }));
@@ -1329,20 +1576,28 @@ export default function App() {
               </div>
               <ul className="members">
                 {others.map((m) => {
-                  const pane = panes.find(
-                    (candidate) =>
-                      candidate.label === m.name &&
-                      windows.some(
-                        (window) =>
-                          window.team === team && leaves(window.root).includes(candidate.id),
-                      ),
-                  );
+                  // Panes are local-only, and member names are unique per
+                  // source rather than globally: a remote source can carry a
+                  // member with the same name as a local one (e.g. claude-win
+                  // on both Windows and Mac). Matching on the name alone would
+                  // show the local pane's status on the remote twin.
+                  const pane = m.read_only
+                    ? undefined
+                    : panes.find(
+                        (candidate) =>
+                          candidate.label === m.name &&
+                          windows.some(
+                            (window) =>
+                              window.team === team && leaves(window.root).includes(candidate.id),
+                          ),
+                      );
                   const status = pane ? (paneStatus[pane.id]?.state ?? "unknown") : null;
                   return (
                     <li
-                      key={m.name}
+                      key={m.source_id + ":" + m.name}
                       className="member-row"
                       onContextMenu={(e) => {
+                        if (m.read_only) return;
                         e.preventDefault();
                         e.stopPropagation();
                         closeAllMenus();
@@ -1365,15 +1620,21 @@ export default function App() {
                       )}
                       <button
                         className="member"
-                        onClick={() => spawnMember(m)}
+                        disabled={m.read_only}
+                        onClick={() => {
+                          if (!m.read_only) void spawnMember(m);
+                        }}
                         title={
-                          pane
-                            ? t("sidebar.member.titleRunning")
-                            : t("sidebar.member.titleSpawn")
+                          m.read_only
+                            ? m.source_label + " (read-only)"
+                            : pane
+                              ? t("sidebar.member.titleRunning")
+                              : t("sidebar.member.titleSpawn")
                         }
                       >
                         <span className="member-name">{m.name}</span>
                         <span className="member-types">
+                          {sources.length > 1 && <>{m.source_label} · </>}
                           {m.types.join(", ") || t("sidebar.member.noTypes")}
                         </span>
                       </button>
@@ -1533,10 +1794,13 @@ export default function App() {
                     <b className="mf">{g.from}</b>
                     <span className="arrow">→</span>
                     <b className="mt">{g.to}</b>
+                    {sources.length > 1 && (
+                      <span className="source-badge">{g.source_label}</span>
+                    )}
                     <span className="grp-time">{g.items[0].created_at.slice(11, 19)}</span>
                   </div>
                   {g.items.map((m) => (
-                    <div className="grp-body" key={m.id}>
+                    <div className="grp-body" key={messageKey(m)}>
                       {m.body}
                     </div>
                   ))}
@@ -1830,8 +2094,8 @@ export default function App() {
                   </span>
                   <select value={target} onChange={(e) => setTarget(e.target.value)}>
                     <option value="">{t("composer.targetPlaceholder")}</option>
-                    {others.map((m) => (
-                      <option key={m.name} value={m.name}>
+                    {sendableOthers.map((m) => (
+                      <option key={m.source_id + ":" + m.name} value={m.name}>
                         {m.name}
                       </option>
                     ))}

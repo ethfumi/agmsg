@@ -6,6 +6,7 @@
 // read-only feed, plus the left-hand member list.
 
 use std::path::PathBuf;
+use std::process::Command;
 use std::thread;
 use std::time::Duration;
 
@@ -198,6 +199,166 @@ fn bash_command() -> Result<std::process::Command, String> {
     Ok(cmd)
 }
 
+const LOCAL_SOURCE_ID: &str = "local";
+const LOCAL_SOURCE_LABEL: &str = "Local";
+
+#[derive(Clone, Serialize)]
+pub struct MessageSource {
+    pub id: String,
+    pub label: String,
+    pub read_only: bool,
+    #[serde(skip_serializing)]
+    transport: SourceTransport,
+}
+
+#[derive(Clone)]
+enum SourceTransport {
+    Local,
+    Ssh { target: String, base: String },
+}
+
+#[derive(Deserialize)]
+struct SourcesFile {
+    #[serde(default)]
+    sources: Vec<SshSourceConfig>,
+}
+
+#[derive(Deserialize)]
+struct SshSourceConfig {
+    id: String,
+    label: String,
+    ssh: String,
+    base: String,
+}
+
+fn sources_config_path() -> PathBuf {
+    if let Ok(over) = std::env::var("AGMSG_APP_SOURCES") {
+        if !over.is_empty() {
+            return PathBuf::from(over);
+        }
+    }
+    let home = home_dir_string().unwrap_or_else(|| ".".into());
+    PathBuf::from(home).join(".agmsg/config/app-sources.json")
+}
+
+fn valid_source_id(id: &str) -> bool {
+    !id.is_empty()
+        && id != LOCAL_SOURCE_ID
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
+fn message_sources() -> Result<Vec<MessageSource>, String> {
+    let mut sources = vec![MessageSource {
+        id: LOCAL_SOURCE_ID.into(),
+        label: LOCAL_SOURCE_LABEL.into(),
+        read_only: false,
+        transport: SourceTransport::Local,
+    }];
+    let path = sources_config_path();
+    if !path.is_file() {
+        return Ok(sources);
+    }
+    let raw = std::fs::read_to_string(&path)
+        .map_err(|e| format!("Couldn't read {}: {e}", path.display()))?;
+    let configured: SourcesFile = serde_json::from_str(&raw)
+        .map_err(|e| format!("Invalid {}: {e}", path.display()))?;
+    let mut seen = std::collections::HashSet::from([LOCAL_SOURCE_ID.to_string()]);
+    for source in configured.sources {
+        if !valid_source_id(&source.id) {
+            return Err(format!(
+                "Invalid source id {:?} in {} (use letters, numbers, '-' or '_'; 'local' is reserved)",
+                source.id,
+                path.display()
+            ));
+        }
+        if !seen.insert(source.id.clone()) {
+            return Err(format!("Duplicate source id {:?} in {}", source.id, path.display()));
+        }
+        if source.label.trim().is_empty()
+            || source.ssh.trim().is_empty()
+            || !source.base.starts_with('/')
+        {
+            return Err(format!(
+                "Source {:?} in {} needs non-empty label/ssh and an absolute remote base path",
+                source.id,
+                path.display()
+            ));
+        }
+        sources.push(MessageSource {
+            id: source.id,
+            label: source.label,
+            read_only: true,
+            transport: SourceTransport::Ssh {
+                target: source.ssh,
+                base: source.base,
+            },
+        });
+    }
+    Ok(sources)
+}
+
+fn source_by_id(id: &str) -> Result<MessageSource, String> {
+    message_sources()?
+        .into_iter()
+        .find(|source| source.id == id)
+        .ok_or_else(|| format!("Unknown agmsg source: {id}"))
+}
+
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
+}
+
+fn ssh_command() -> Command {
+    let mut cmd = Command::new("ssh");
+    cmd.args([
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        "ConnectTimeout=3",
+        "-o",
+        "ServerAliveInterval=2",
+        "-o",
+        "ServerAliveCountMax=1",
+    ]);
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    if let Some(path) = crate::imported_path() {
+        cmd.env("PATH", path);
+    }
+    cmd
+}
+
+fn run_source_script(source: &MessageSource, name: &str, args: &[&str]) -> Result<String, String> {
+    match &source.transport {
+        SourceTransport::Local => run_script(name, args),
+        SourceTransport::Ssh { target, base } => {
+            let script = format!("{base}/scripts/{name}");
+            let remote_command = std::iter::once(script.as_str())
+                .chain(args.iter().copied())
+                .map(shell_quote)
+                .collect::<Vec<_>>()
+                .join(" ");
+            let output = ssh_command()
+                .arg(target)
+                .arg(remote_command)
+                .output()
+                .map_err(|e| format!("Couldn't run ssh for source {}: {e}", source.label))?;
+            if output.status.success() {
+                Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+            } else {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                Err(format!("{}: {}", source.label, stderr.trim()))
+            }
+        }
+    }
+}
+
 fn db_path() -> PathBuf {
     agmsg_base().join("db/messages.db")
 }
@@ -212,7 +373,9 @@ fn open_ro() -> Result<rusqlite::Connection, String> {
 
 #[derive(Clone, Serialize)]
 pub struct Message {
-    pub id: i64,
+    pub id: String,
+    pub source_id: String,
+    pub source_label: String,
     pub team: String,
     pub from: String,
     pub to: String,
@@ -222,6 +385,9 @@ pub struct Message {
 
 #[derive(Clone, Serialize)]
 pub struct Member {
+    pub source_id: String,
+    pub source_label: String,
+    pub read_only: bool,
     pub name: String,
     /// Agent types registered under this name (claude-code, codex, ...).
     pub types: Vec<String>,
@@ -378,8 +544,8 @@ struct ApiMember {
 /// that lands, not what needs to change. `id` is a JSON *string* on the
 /// wire — api.sh CASTs it, since the driver interface treats every message
 /// id as opaque (a legacy sqlite int today, potentially a UUIDv7 or
-/// Redis-stream-id tomorrow) — parsed back to `i64` below for `Message`,
-/// which is a Tauri-IPC-only contract with the frontend, not agmsg's.
+/// Redis-stream-id tomorrow). `Message` preserves that opaque string and
+/// adds source metadata for its Tauri IPC contract with the frontend.
 #[derive(Deserialize)]
 struct ApiMessage {
     id: String,
@@ -540,6 +706,83 @@ pub fn agmsg_teams() -> Result<Vec<String>, String> {
 
 /// Members of a team, via `api.sh get teams <team> members`.
 #[tauri::command]
+pub fn agmsg_sources() -> Result<Vec<MessageSource>, String> {
+    message_sources()
+}
+
+#[tauri::command]
+pub fn agmsg_source_teams(source_id: String) -> Result<Vec<String>, String> {
+    let source = source_by_id(&source_id)?;
+    let raw = run_source_script(&source, "api.sh", &["get", "teams"])?;
+    let mut teams: Vec<String> =
+        parse_jsonl::<ApiTeam>(&raw).into_iter().map(|t| t.name).collect();
+    teams.sort();
+    Ok(teams)
+}
+
+#[tauri::command]
+pub fn agmsg_source_members(source_id: String, team: String) -> Result<Vec<Member>, String> {
+    let source = source_by_id(&source_id)?;
+    let raw = run_source_script(&source, "api.sh", &["get", "teams", &team, "members"])?;
+    let mut members: Vec<Member> = parse_jsonl::<ApiMember>(&raw)
+        .into_iter()
+        .map(|m| {
+            let mut types = m.types;
+            types.sort();
+            types.dedup();
+            Member {
+                source_id: source.id.clone(),
+                source_label: source.label.clone(),
+                read_only: source.read_only,
+                name: m.name,
+                types,
+                project: m.project.unwrap_or_default(),
+            }
+        })
+        .collect();
+    members.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(members)
+}
+
+#[tauri::command]
+pub fn agmsg_source_messages(
+    source_id: String,
+    team: String,
+    limit: Option<u32>,
+    before_id: Option<String>,
+    after_id: Option<String>,
+) -> Result<Vec<Message>, String> {
+    if before_id.is_some() && after_id.is_some() {
+        return Err("beforeId and afterId are mutually exclusive".into());
+    }
+    let source = source_by_id(&source_id)?;
+    let limit_s = limit.unwrap_or(30).to_string();
+    let mut args = vec!["get", "teams", &team, "messages", "--limit", &limit_s];
+    if let Some(id) = before_id.as_deref() {
+        args.push("--before-id");
+        args.push(id);
+    }
+    if let Some(id) = after_id.as_deref() {
+        args.push("--after-id");
+        args.push(id);
+    }
+    let raw = run_source_script(&source, "api.sh", &args)?;
+    Ok(parse_jsonl::<ApiMessage>(&raw)
+        .into_iter()
+        .map(|m| Message {
+            id: m.id,
+            source_id: source.id.clone(),
+            source_label: source.label.clone(),
+            team: m.team,
+            from: m.from,
+            to: m.to,
+            body: m.body,
+            created_at: m.created_at,
+        })
+        .collect())
+}
+
+#[tauri::command]
 pub fn agmsg_members(team: String) -> Result<Vec<Member>, String> {
     let raw = run_script("api.sh", &["get", "teams", &team, "members"])?;
     let mut members: Vec<Member> = parse_jsonl::<ApiMember>(&raw)
@@ -548,7 +791,14 @@ pub fn agmsg_members(team: String) -> Result<Vec<Member>, String> {
             let mut types = m.types;
             types.sort();
             types.dedup();
-            Member { name: m.name, types, project: m.project.unwrap_or_default() }
+            Member {
+                source_id: LOCAL_SOURCE_ID.into(),
+                source_label: LOCAL_SOURCE_LABEL.into(),
+                read_only: false,
+                name: m.name,
+                types,
+                project: m.project.unwrap_or_default(),
+            }
         })
         .collect();
     members.sort_by(|a, b| a.name.cmp(&b.name));
@@ -578,14 +828,16 @@ pub fn agmsg_messages(
     let raw = run_script("api.sh", &args)?;
     Ok(parse_jsonl::<ApiMessage>(&raw)
         .into_iter()
-        .filter_map(|m| Some(Message {
-            id: m.id.parse().ok()?,
+        .map(|m| Message {
+            id: m.id,
+            source_id: LOCAL_SOURCE_ID.into(),
+            source_label: LOCAL_SOURCE_LABEL.into(),
             team: m.team,
             from: m.from,
             to: m.to,
             body: m.body,
             created_at: m.created_at,
-        }))
+        })
         .collect())
 }
 
@@ -714,8 +966,11 @@ pub fn start_watcher(app: AppHandle) {
                     Err(_) => return,
                 };
                 let mapped = stmt.query_map(rusqlite::params![last_id], |r| {
+                    let id: i64 = r.get(0)?;
                     Ok(Message {
-                        id: r.get(0)?,
+                        id: id.to_string(),
+                        source_id: LOCAL_SOURCE_ID.into(),
+                        source_label: LOCAL_SOURCE_LABEL.into(),
                         team: r.get(1)?,
                         from: r.get(2)?,
                         to: r.get(3)?,
@@ -729,7 +984,9 @@ pub fn start_watcher(app: AppHandle) {
                 }
             };
             for m in new_rows {
-                last_id = m.id.max(last_id);
+                if let Ok(id) = m.id.parse::<i64>() {
+                    last_id = id.max(last_id);
+                }
                 let _ = app.emit("agmsg-message", m);
             }
             thread::sleep(Duration::from_millis(800));
@@ -739,7 +996,10 @@ pub fn start_watcher(app: AppHandle) {
 
 #[cfg(test)]
 mod tests {
-    use super::{agmsg_base, msys_to_native, parse_semver, run_script, to_bash_slashes};
+    use super::{
+        agmsg_base, message_sources, msys_to_native, parse_semver, run_script, shell_quote,
+        to_bash_slashes, valid_source_id,
+    };
     use serial_test::serial;
     use std::io::Write;
 
@@ -903,6 +1163,39 @@ mod tests {
     }
 
     #[test]
+    fn source_ids_are_safe_config_keys() {
+        assert!(valid_source_id("mac-studio_2"));
+        assert!(!valid_source_id(""));
+        assert!(!valid_source_id("local"));
+        assert!(!valid_source_id("mac studio"));
+        assert!(!valid_source_id("../mac"));
+    }
+
+    #[test]
+    fn ssh_arguments_are_single_quoted() {
+        assert_eq!(shell_quote("plain"), "'plain'");
+        assert_eq!(shell_quote("it's safe"), "'it'\"'\"'s safe'");
+    }
+
+    #[test]
+    #[serial]
+    fn source_config_adds_read_only_ssh_sources() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("sources.json");
+        std::fs::write(
+            &config,
+            r#"{"sources":[{"id":"mac","label":"Mac","ssh":"you@mac","base":"/Users/you/.agents/skills/agmsg"}]}"#,
+        )
+        .unwrap();
+        let _env = EnvGuard::set("AGMSG_APP_SOURCES", &config.to_string_lossy());
+        let sources = message_sources().unwrap();
+        assert_eq!(sources.len(), 2);
+        assert_eq!(sources[0].id, "local");
+        assert_eq!(sources[1].id, "mac");
+        assert!(sources[1].read_only);
+    }
+
+    #[test]
     #[serial]
     fn agmsg_base_honors_the_env_override() {
         let dir = tempfile::tempdir().unwrap();
@@ -950,6 +1243,34 @@ mod tests {
     fn run_script_errors_when_the_script_is_missing() {
         let _base = fake_base(&[]);
         assert!(run_script("nope.sh", &[]).is_err());
+    }
+
+    #[test]
+    #[serial]
+    fn source_messages_parse_the_public_api_shape() {
+        let _base = fake_base(&[(
+            "api.sh",
+            r#"cat <<'JSON'
+{"type":"message_sent","id":"42","team":"yuzu","from":"alice","to":"bob","body":"hello","at":"2026-07-14T00:00:00Z"}
+JSON
+"#,
+        )]);
+        let missing_config = _base._dir.path().join("no-sources.json");
+        let _sources = EnvGuard::set("AGMSG_APP_SOURCES", &missing_config.to_string_lossy());
+
+        let messages = super::agmsg_source_messages(
+            "local".into(),
+            "yuzu".into(),
+            Some(2),
+            None,
+            None,
+        )
+        .expect("public message API should parse");
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].id, "42");
+        assert_eq!(messages[0].source_id, "local");
+        assert_eq!(messages[0].body, "hello");
     }
 
     // --- #315 Windows spawn-path regression (runs on the windows-latest job) ---
