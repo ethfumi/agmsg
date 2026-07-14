@@ -13,6 +13,7 @@ import {
   Users,
 } from "lucide-react";
 import { TerminalPane } from "./TerminalPane";
+import { aggregateTeamStatus, applyStateChange, type PaneStatusMap, type RawState } from "./agentStatus";
 import {
   AgentModal,
   AppUserModal,
@@ -154,6 +155,7 @@ export default function App() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [, setSourceHistoryState] = useState<Record<string, SourceHistory>>({});
   const [panes, setPanes] = useState<Pane[]>([]);
+  const [paneStatus, setPaneStatus] = useState<PaneStatusMap>({});
   const [windows, setWindows] = useState<Window[]>([]);
   const [active, setActive] = useState<string>("room");
   const [target, setTarget] = useState<string>("");
@@ -318,6 +320,9 @@ export default function App() {
   panesRef.current = panes;
   const windowsRef = useRef<Window[]>([]);
   windowsRef.current = windows;
+  const applyAgentState = useCallback((paneId: string, state: RawState) => {
+    setPaneStatus((current) => applyStateChange(current, paneId, state));
+  }, []);
 
   // The app user = the member registered with the agmsg-app type (one per team).
   const appUserMember = members.find(
@@ -712,6 +717,24 @@ export default function App() {
     };
   }, [team, sources, updateSourceHistory]);
 
+  useEffect(() => {
+    const stateListener = listen<{ id: string; state: RawState }>("agent-state", (event) => {
+      applyAgentState(event.payload.id, event.payload.state);
+    });
+    const exitListener = listen<{ id: string }>("pty-exit", (event) => {
+      setPaneStatus((current) => {
+        if (!(event.payload.id in current)) return current;
+        const next = { ...current };
+        delete next[event.payload.id];
+        return next;
+      });
+    });
+    return () => {
+      void stateListener.then((unlisten) => unlisten());
+      void exitListener.then((unlisten) => unlisten());
+    };
+  }, [applyAgentState]);
+
   // Load-more-on-scroll-up: fetch the page older than the currently-oldest
   // loaded message and prepend it, restoring the scroll position afterward
   // (a naive prepend would otherwise yank the view down by the new content's
@@ -1027,6 +1050,17 @@ export default function App() {
   // teams' windows stay mounted with their PTYs alive, just not listed
   // here or offered as spawn/move targets.
   const teamWindows = useMemo(() => windows.filter((w) => w.team === team), [windows, team]);
+  const teamStatusByName = useMemo(() => {
+    return Object.fromEntries(
+      teams.map((teamName) => {
+        const paneIds = windows
+          .filter((window) => window.team === teamName)
+          .flatMap((window) => leaves(window.root));
+        const statuses = paneIds.map((paneId) => paneStatus[paneId] ?? { state: "unknown" as const });
+        return [teamName, aggregateTeamStatus(statuses)];
+      }),
+    );
+  }, [teams, windows, paneStatus]);
 
   // If Show Team Room gets switched off while it's the active tab, land on
   // whichever pane tab exists instead — the room tab itself is about to
@@ -1438,6 +1472,22 @@ export default function App() {
                 </div>
               )}
 
+              <div className="team-status-rail collapsed-team-status" aria-label="Open pane status">
+                {teams.map((teamName) => {
+                  const status = teamStatusByName[teamName] ?? "unknown";
+                  return (
+                    <button
+                      key={teamName}
+                      className={teamName === team ? "team-status-row active" : "team-status-row"}
+                      title={`${teamName}: ${status} (open panes)`}
+                      onClick={() => setTeam(teamName)}
+                    >
+                      <span className={`team-status-dot status-${status}`} />
+                    </button>
+                  );
+                })}
+              </div>
+
               <div className="rail-spacer" />
 
               {appUser && (
@@ -1497,13 +1547,22 @@ export default function App() {
                   )}
                   </div>
                 </div>
-                <select value={team} onChange={(e) => setTeam(e.target.value)}>
-                  {teams.map((teamName) => (
-                    <option key={teamName} value={teamName}>
-                      {teamName}
-                    </option>
-                  ))}
-                </select>
+              </div>
+              <div className="team-status-rail" aria-label="Open pane status">
+                {teams.map((teamName) => {
+                  const status = teamStatusByName[teamName] ?? "unknown";
+                  return (
+                    <button
+                      key={teamName}
+                      className={teamName === team ? "team-status-row active" : "team-status-row"}
+                      title={`${teamName}: ${status} (open panes)`}
+                      onClick={() => setTeam(teamName)}
+                    >
+                      <span className={`team-status-dot status-${status}`} />
+                      <span className="team-status-name">{teamName}</span>
+                    </button>
+                  );
+                })}
               </div>
               <div className="sidebar-title">
                 <span>{t("sidebar.title")}</span>
@@ -1516,53 +1575,65 @@ export default function App() {
                 )}
               </div>
               <ul className="members">
-                {others.map((m) => (
-                  <li
-                    key={m.source_id + ":" + m.name}
-                    className="member-row"
-                    onContextMenu={(e) => {
-                      if (m.read_only) return;
-                      e.preventDefault();
-                      e.stopPropagation();
-                      closeAllMenus();
-                      setMemberMenu({ member: m, x: e.clientX, y: e.clientY });
-                    }}
-                  >
-                    {active === "room" && (
-                      <input
-                        type="checkbox"
-                        className="member-check"
-                        title={t("sidebar.member.checkboxTitle")}
-                        checked={!deselected.has(m.name)}
-                        onChange={() => toggleMember(m.name)}
-                        onClick={(e) => e.stopPropagation()}
-                      />
-                    )}
-                    <button
-                      className="member"
-                      disabled={m.read_only}
-                      onClick={() => {
-                        if (!m.read_only) void spawnMember(m);
+                {others.map((m) => {
+                  const pane = panes.find(
+                    (candidate) =>
+                      candidate.label === m.name &&
+                      windows.some(
+                        (window) =>
+                          window.team === team && leaves(window.root).includes(candidate.id),
+                      ),
+                  );
+                  const status = pane ? (paneStatus[pane.id]?.state ?? "unknown") : null;
+                  return (
+                    <li
+                      key={m.source_id + ":" + m.name}
+                      className="member-row"
+                      onContextMenu={(e) => {
+                        if (m.read_only) return;
+                        e.preventDefault();
+                        e.stopPropagation();
+                        closeAllMenus();
+                        setMemberMenu({ member: m, x: e.clientX, y: e.clientY });
                       }}
-                      title={
-                        m.read_only
-                          ? m.source_label + " (read-only)"
-                          : panes.some((p) => p.label === m.name)
-                            ? t("sidebar.member.titleRunning")
-                            : t("sidebar.member.titleSpawn")
-                      }
                     >
-                      <span className="member-name">
-                        {m.name}
-                        {panes.some((p) => p.label === m.name) && <span className="running-dot" />}
-                      </span>
-                      <span className="member-types">
-                        {sources.length > 1 && <>{m.source_label} · </>}
-                        {m.types.join(", ") || t("sidebar.member.noTypes")}
-                      </span>
-                    </button>
-                  </li>
-                ))}
+                      {active === "room" ? (
+                        <input
+                          type="checkbox"
+                          className="member-check"
+                          title={t("sidebar.member.checkboxTitle")}
+                          checked={!deselected.has(m.name)}
+                          onChange={() => toggleMember(m.name)}
+                          onClick={(e) => e.stopPropagation()}
+                        />
+                      ) : (
+                        <span className="member-check-slot">
+                          {status && <span className={`agent-status-dot status-${status}`} title={status} />}
+                        </span>
+                      )}
+                      <button
+                        className="member"
+                        disabled={m.read_only}
+                        onClick={() => {
+                          if (!m.read_only) void spawnMember(m);
+                        }}
+                        title={
+                          m.read_only
+                            ? m.source_label + " (read-only)"
+                            : pane
+                              ? t("sidebar.member.titleRunning")
+                              : t("sidebar.member.titleSpawn")
+                        }
+                      >
+                        <span className="member-name">{m.name}</span>
+                        <span className="member-types">
+                          {sources.length > 1 && <>{m.source_label} · </>}
+                          {m.types.join(", ") || t("sidebar.member.noTypes")}
+                        </span>
+                      </button>
+                    </li>
+                  );
+                })}
                 {others.length === 0 && (
                   <li className="empty">{t("sidebar.member.emptyState")}</li>
                 )}
@@ -1887,7 +1958,13 @@ export default function App() {
                       ×
                     </button>
                   </div>
-                  <TerminalPane id={p.id} cmd={p.cmd} args={p.args} cwd={p.cwd} />
+                  <TerminalPane
+                    id={p.id}
+                    cmd={p.cmd}
+                    args={p.args}
+                    cwd={p.cwd}
+                    onAgentState={applyAgentState}
+                  />
                 </div>
               );
             })}

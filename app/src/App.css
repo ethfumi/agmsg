@@ -624,6 +624,58 @@ body.resizing-row {
 .sidebar-head select {
   width: 100%;
 }
+.team-status-rail {
+  display: flex;
+  flex-direction: column;
+  border-bottom: 1px solid var(--border);
+  padding: 3px 6px;
+}
+.team-status-row {
+  height: 20px;
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 6px;
+  width: 100%;
+  padding: 0 4px;
+  background: none;
+  border: none;
+  border-radius: 3px;
+  cursor: pointer;
+  color: inherit;
+  font-size: 11px;
+  text-align: left;
+}
+.team-status-row:hover,
+.team-status-row.active {
+  background: var(--panel-2);
+}
+.team-status-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.team-status-dot {
+  flex: 0 0 auto;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--muted);
+}
+.team-status-dot.status-blocked { background: #f7768e; }
+.team-status-dot.status-working { background: #e0af68; }
+.team-status-dot.status-idle { background: var(--green); }
+.collapsed-team-status {
+  width: 28px;
+  padding: 2px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+}
+.collapsed-team-status .team-status-row {
+  justify-content: center;
+  gap: 0;
+  padding: 0;
+}
 .language-switcher {
   font-size: 11px;
 }
@@ -673,6 +725,14 @@ body.resizing-row {
   cursor: pointer;
   margin-left: 4px;
 }
+.member-check-slot {
+  flex-shrink: 0;
+  width: 13px;
+  margin-left: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
 .member {
   flex: 1;
   min-width: 0;
@@ -694,15 +754,23 @@ body.resizing-row {
 .member-name {
   font-weight: 600;
 }
-/* Green dot marks a member that already has a live pane. */
-.running-dot {
+.agent-status-dot {
   display: inline-block;
   width: 7px;
   height: 7px;
-  margin-left: 6px;
   border-radius: 50%;
-  background: var(--green);
+  background: var(--muted);
   vertical-align: middle;
+}
+.agent-status-dot.status-blocked { background: #f7768e; }
+.agent-status-dot.status-working {
+  background: #e0af68;
+  animation: agent-status-pulse 1.2s ease-in-out infinite;
+}
+.agent-status-dot.status-idle { background: var(--green); }
+
+@keyframes agent-status-pulse {
+  50% { opacity: 0.35; transform: scale(0.8); }
 }
 .member-types {
   font-size: 11px;
