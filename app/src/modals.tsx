@@ -6,12 +6,40 @@ import { AUTO_TIMEZONE, detectTimeZone, isValidTimeZone, listTimeZones } from ".
 
 type BrowseDir = (current: string) => Promise<string | null>;
 
+/**
+ * Whether an Escape keydown should close a modal. Excludes IME composition:
+ * while composing (e.g. converting kana to kanji), Escape cancels the
+ * pending conversion rather than acting on the page, and WKWebView doesn't
+ * always set `isComposing` for that event — keyCode 229 is the traditional
+ * cross-browser signal for "this keydown belongs to an IME," so it's
+ * checked too. Also respects `defaultPrevented`, so a child (a native
+ * select, a datalist) that already consumed the Escape keeps the modal
+ * open. Exported as a pure function so this logic is unit-testable without
+ * mounting a component.
+ */
+export function shouldCloseOnEscape(e: Pick<KeyboardEvent, "key" | "isComposing" | "keyCode" | "defaultPrevented">): boolean {
+  if (e.key !== "Escape") return false;
+  if (e.defaultPrevented) return false;
+  if (e.isComposing || e.keyCode === 229) return false;
+  return true;
+}
+
 /** Modal chrome: dimmed backdrop + centered card. */
 function Modal(props: {
   title: string;
   children: React.ReactNode;
   onClose?: () => void;
 }) {
+  const { onClose } = props;
+  useEffect(() => {
+    if (!onClose) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (shouldCloseOnEscape(e)) onClose();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [onClose]);
+
   return (
     <div className="modal-backdrop" onClick={props.onClose}>
       <div className="modal" onClick={(e) => e.stopPropagation()}>
