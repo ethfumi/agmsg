@@ -10,6 +10,72 @@ teardown() {
   teardown_test_env
 }
 
+# Auto-detect tests must not depend on the actual runtime this suite itself
+# happens to run under (#142): when bats runs from inside a real Codex/
+# Gemini/etc session, ambient env vars and the real process tree can make
+# detect_cli_type see a signal the test never set, masking the fallback (or
+# a different env var's) path under test.
+#
+# Derived from the type registry (agmsg_type_get ... detect), not a
+# hardcoded list -- detect_cli_type itself is registry-driven with "no
+# hardcoded type list" by design (see its own comment in whoami.sh), so a
+# hardcoded var list here would silently stop covering a future type's new
+# detect= var. Found in review of the first cut of this fix.
+clear_autodetect_env() {
+  # shellcheck disable=SC1091
+  source "$SCRIPTS/lib/type-registry.sh"
+  local t detect v
+  while IFS= read -r t; do
+    [ -n "$t" ] || continue
+    detect="$(agmsg_type_get "$t" detect)"
+    [ -n "$detect" ] && [ "$detect" != "explicit" ] || continue
+    for v in $detect; do
+      unset "$v" 2>/dev/null || true
+    done
+  done <<EOF
+$(agmsg_known_types | sort -u)
+EOF
+}
+
+# Prepend a fake `ps` to PATH so detect_cli_type's process-tree walk can
+# never match a real ancestor process name (e.g. `codex` when this suite
+# itself runs under a live Codex session) -- reports no process name and an
+# immediate top-of-tree, so the walk always falls through to the default.
+#
+# Covers all THREE of compat.sh's process-lookup shapes, not just the
+# POSIX one (P1 from review of the first cut): compat_get_comm/
+# compat_get_ppid's POSIX branch (`ps -o comm=`/`ps -o ppid=`), AND their
+# MSYS branch, which on a real MSYS host tries /proc/<pid>/cmdline and a
+# WinPID/CIM lookup BEFORE ever falling back to `ps -l -p` -- so this also
+# forces those two branches to skip straight to the ps fallback that this
+# mock actually answers.
+mock_no_agent_ps() {
+  local bindir="$TEST_SKILL_DIR/mock-ps-bin"
+  mkdir -p "$bindir"
+  cat > "$bindir/ps" <<'EOF'
+#!/usr/bin/env bash
+case "$*" in
+  *"-l"*)
+    # MSYS `ps -l -p <pid>` shape (compat_get_comm's final fallback,
+    # compat_get_ppid, and _compat_get_winpid all parse this format by
+    # HEADER COLUMN NAME, not position). Deliberately name no column
+    # WINPID or PPID, so every one of those awk extractors finds nothing
+    # and reports empty -- same "nothing found" outcome as the POSIX
+    # branch below, not a specific pid value that could be misread as a
+    # real ancestor.
+    printf 'S UID PID TIME CMD\n'
+    printf '0 0 1 0:00 mock-no-agent\n'
+    ;;
+  *"-o ppid="*) echo 1 ;;
+  *) exit 0 ;;
+esac
+EOF
+  chmod +x "$bindir/ps"
+  export PATH="$bindir:$PATH"
+  export _AGMSG_COMPAT_NO_PROC=1
+  export _AGMSG_COMPAT_NO_CIM=1
+}
+
 # --- join.sh ---
 
 @test "join: creates team and adds agent" {
@@ -189,6 +255,7 @@ teardown() {
 
 @test "whoami: auto-detects claude-code from CLAUDE_CODE_SESSION_ID env" {
   bash "$SCRIPTS/join.sh" myteam alice claude-code /tmp/proj
+  clear_autodetect_env
   CLAUDE_CODE_SESSION_ID=test-session run bash "$SCRIPTS/whoami.sh" /tmp/proj
   [ "$status" -eq 0 ]
   [[ "$output" =~ "agent=alice" ]]
@@ -197,10 +264,12 @@ teardown() {
 
 @test "whoami: auto-detects codex from CODEX_SANDBOX env" {
   bash "$SCRIPTS/join.sh" myteam bob codex /tmp/proj
-  # Unset CLAUDE_CODE_SESSION_ID: bats can run under a CC session that
-  # already exports it, which would shadow the codex signal under the
-  # CLAUDE_CODE_SESSION_ID-first detection order.
-  unset CLAUDE_CODE_SESSION_ID
+  # Clear ALL ambient auto-detect vars, not just CLAUDE_CODE_SESSION_ID --
+  # bats can run under a real Codex session that already exports
+  # CODEX_THREAD_ID too, which would still land on codex here (so this
+  # particular assertion happens to survive it) but masks whether
+  # CODEX_SANDBOX specifically is what's being exercised.
+  clear_autodetect_env
   CODEX_SANDBOX=seatbelt run bash "$SCRIPTS/whoami.sh" /tmp/proj
   [ "$status" -eq 0 ]
   [[ "$output" =~ "agent=bob" ]]
@@ -209,7 +278,7 @@ teardown() {
 
 @test "whoami: auto-detects codex from CODEX_THREAD_ID env" {
   bash "$SCRIPTS/join.sh" myteam bob codex /tmp/proj
-  unset CLAUDE_CODE_SESSION_ID
+  clear_autodetect_env
   CODEX_THREAD_ID=some-thread run bash "$SCRIPTS/whoami.sh" /tmp/proj
   [ "$status" -eq 0 ]
   [[ "$output" =~ "agent=bob" ]]
@@ -218,6 +287,8 @@ teardown() {
 
 @test "whoami: defaults to claude-code when no env vars set" {
   bash "$SCRIPTS/join.sh" myteam alice claude-code /tmp/proj
+  clear_autodetect_env
+  mock_no_agent_ps
   run bash "$SCRIPTS/whoami.sh" /tmp/proj
   [ "$status" -eq 0 ]
   [[ "$output" =~ "agent=alice" ]]
@@ -227,6 +298,7 @@ teardown() {
 @test "whoami: explicit type overrides auto-detection" {
   bash "$SCRIPTS/join.sh" myteam alice claude-code /tmp/proj
   bash "$SCRIPTS/join.sh" myteam bob codex /tmp/proj
+  clear_autodetect_env
   CODEX_SANDBOX=test run bash "$SCRIPTS/whoami.sh" /tmp/proj claude-code
   [ "$status" -eq 0 ]
   [[ "$output" =~ "agent=alice" ]]
