@@ -9,6 +9,7 @@
   "startupError": {
     "installing": "正在安裝 agmsg…",
     "installFailed": "無法安裝 agmsg：{{error}}",
+    "loginShellFailed": "無法判斷您的登入 Shell：{{error}}",
     "loadTeamsFailed": "無法載入 agmsg 團隊：{{error}}。agmsg 是否已安裝於 ~/.agents/skills/agmsg？",
     "coreOutdated": "已安裝的 agmsg CLI 版本過舊（{{installed}} < {{pinned}}），可能無法與此應用程式正常搭配。",
     "versionUnknown": "未知",
@@ -27,7 +28,12 @@
       "team": "團隊…",
       "agent": "代理…"
     },
+    "team": {
+      "title": "團隊",
+      "new": "新增團隊"
+    },
     "title": "代理",
+    "newAgent": "新增代理",
     "filter": {
       "all": "全部",
       "none": "無"
@@ -37,7 +43,7 @@
       "titleRunning": "已在執行中 — 點選以切換至該面板",
       "titleSpawn": "在 PTY 面板中啟動",
       "noTypes": "—",
-      "emptyState": "尚無代理。請使用「＋ 新增 → 代理」新增。"
+      "emptyState": "尚無代理。請使用上方的「＋」按鈕新增。"
     },
     "user": {
       "title": "{{team}} 的 app-user"
@@ -45,7 +51,9 @@
   },
   "tabs": {
     "roomLabel": "# 團隊聊天室",
-    "close": "×"
+    "close": "×",
+    "newShell": "新增 Shell 分頁",
+    "shellLabel": "Shell"
   },
   "room": {
     "loadingMore": "載入更多…",
@@ -150,6 +158,7 @@
     },
     "window": {
       "rename": "重新命名…",
+      "openShell": "開啟 Shell",
       "layout": "版面配置 ▸",
       "layoutVertical": "縱向",
       "layoutHorizontal": "橫向",
@@ -173,6 +182,10 @@
     "title": "設定",
     "terminalFontSize": {
       "label": "終端機字型大小"
+    },
+    "timezone": {
+      "label": "時區",
+      "auto": "自動 ({{zone}})"
     }
   },
   "nativeMenu": {

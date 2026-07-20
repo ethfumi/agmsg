@@ -70,6 +70,8 @@ SH
 # --- end-to-end roundtrip through the override ---
 
 @test "storage: send and inbox share the overridden db" {
+  bash "$SCRIPTS/join.sh" testteam alice claude-code /tmp/project-a
+  bash "$SCRIPTS/join.sh" testteam bob claude-code /tmp/project-b
   export AGMSG_STORAGE_PATH="$BATS_TEST_TMPDIR/store"
   bash "$SCRIPTS/send.sh" testteam alice bob "hi via override"
   [ -f "$AGMSG_STORAGE_PATH/messages.db" ]
@@ -85,6 +87,7 @@ SH
 
   # Register an agent so check-inbox can resolve identity via whoami.
   bash "$SCRIPTS/join.sh" testteam alice claude-code "$project"
+  bash "$SCRIPTS/join.sh" testteam bob claude-code /tmp/agmsg-storage-test-bob
 
   # A message addressed to alice lives only in the overridden store.
   AGMSG_STORAGE_PATH="$store" bash "$SCRIPTS/send.sh" testteam bob alice "via override store"
@@ -102,6 +105,8 @@ SH
 @test "storage: default db is untouched when the override is set" {
   # The default store was initialized in setup; writing through an override
   # must not add rows to it.
+  bash "$SCRIPTS/join.sh" testteam alice claude-code /tmp/project-a
+  bash "$SCRIPTS/join.sh" testteam bob claude-code /tmp/project-b
   export AGMSG_STORAGE_PATH="$BATS_TEST_TMPDIR/store"
   bash "$SCRIPTS/send.sh" testteam alice bob "isolated"
 
@@ -131,12 +136,40 @@ SH
   ! printf '%s' "$output" | grep -q '\^_'
 }
 
+@test "storage: runtime lock replacement is compare-and-swap" {
+  source "$SCRIPTS/lib/storage.sh"
+  local resource="codex-dispatcher:test" owner
+
+  owner="$(agmsg_runtime_lock_acquire "$resource" 111)"
+  [ "$owner" = 111 ]
+  owner="$(agmsg_runtime_lock_acquire "$resource" 222 111)"
+  [ "$owner" = 222 ]
+  # A contender that observed the old generation cannot delete its successor.
+  owner="$(agmsg_runtime_lock_acquire "$resource" 333 111)"
+  [ "$owner" = 222 ]
+  agmsg_runtime_lock_verify "$resource" 222
+  ! agmsg_runtime_lock_verify "$resource" 333
+  agmsg_runtime_lock_release "$resource" 333
+  agmsg_runtime_lock_verify "$resource" 222
+  agmsg_runtime_lock_release "$resource" 222
+  [ -z "$(agmsg_runtime_lock_owner "$resource")" ]
+}
+
+@test "storage: runtime lock initializes a fresh store before send" {
+  export AGMSG_STORAGE_PATH="$BATS_TEST_TMPDIR/lock-first-store"
+  source "$SCRIPTS/lib/storage.sh"
+
+  [ "$(agmsg_runtime_lock_acquire codex-dispatcher:test 111)" = 111 ]
+  bash "$SCRIPTS/send.sh" team alice bob "after lock init" --force
+  [ "$(agmsg_sqlite "$(agmsg_db_path)" "SELECT COUNT(*) FROM messages WHERE body = 'after lock init';")" = 1 ]
+}
+
 @test "send: concurrent fan-out to N recipients all land (no SQLITE_BUSY)" {
   # Without a busy_timeout, concurrent writers fail with SQLITE_BUSY(5) and the
   # sends silently drop. With the wrapper they wait and all land. See #114.
   local x
   for x in 1 2 3 4 5 6 7 8 9 10; do
-    ( bash "$SCRIPTS/send.sh" team leader "tgt$x" "job $x" >/dev/null 2>&1 ) &
+    ( bash "$SCRIPTS/send.sh" team leader "tgt$x" "job $x" --force >/dev/null 2>&1 ) &
   done
   wait
   local n
@@ -152,7 +185,7 @@ SH
   export AGMSG_STORAGE_PATH="$BATS_TEST_TMPDIR/freshstore"
   local x
   for x in 1 2 3 4 5 6 7 8 9 10; do
-    ( bash "$SCRIPTS/send.sh" team leader "tgt$x" "job $x" >/dev/null 2>&1 ) &
+    ( bash "$SCRIPTS/send.sh" team leader "tgt$x" "job $x" --force >/dev/null 2>&1 ) &
   done
   wait
   local n

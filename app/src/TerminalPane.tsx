@@ -5,6 +5,7 @@ import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { createWriteBatcher } from "./writeBatcher";
 
 type Props = {
   /** Stable session id; also the key the backend stores the PTY under. */
@@ -83,20 +84,59 @@ export function TerminalPane({ id, cmd, args = [], cwd, fontSize = 12, onAgentSt
       onCellSize?.(el.offsetWidth / term.cols, el.offsetHeight / term.rows);
     };
 
+    // Coalesce PTY output into at most one term.write() per animation frame
+    // instead of one per backend event. The Rust reader thread emits an
+    // event per raw PTY read (unbatched, no debounce) — a chatty CLI (issue
+    // #383: Codex's title-escape-driven spinner churns very frequently)
+    // can fire far more of these than the browser can usefully paint
+    // between frames. Unverified hypothesis behind this change: each
+    // term.write() resets xterm's cursor blink phase, so writing many
+    // times within a single frame is a plausible source of the reported
+    // visible flicker/jitter — batching bounds that to once per frame
+    // regardless of how bursty the backend is. See writeBatcher.ts for why
+    // this isn't just a bare requestAnimationFrame (it stalls in a
+    // backgrounded/occluded webview, and agmsg mounts panes while hidden).
+    const writeBatcher = createWriteBatcher({ onFlush: (data) => term.write(data) });
+
     const unlisteners: Array<() => void> = [];
     (async () => {
       // Register listeners BEFORE spawning so no early output is missed.
-      unlisteners.push(
-        await listen<{ id: string; b64: string }>("pty-output", (e) => {
-          if (e.payload.id === id) term.write(b64ToBytes(e.payload.b64));
-        }),
-      );
-      unlisteners.push(
-        await listen<{ id: string }>("pty-exit", (e) => {
-          if (e.payload.id === id) term.write(`\r\n\x1b[90m${t("terminal.processExited")}\x1b[0m\r\n`);
-        }),
-      );
-      if (disposed) return;
+      // `listen()` is async — if this effect's cleanup runs while one of
+      // these awaits is still in flight (a fast unmount/remount, or React
+      // re-running the effect), the listener resolves into a component
+      // that's already torn down. Each registration below checks `disposed`
+      // right after its own await and, if already torn down, unregisters
+      // itself immediately instead of joining `unlisteners` — otherwise the
+      // Tauri listener would keep firing this closure's stale term/
+      // writeBatcher forever (a real listener leak), and — before
+      // writeBatcher.dispose() became permanent (see writeBatcher.ts) —
+      // could even resurrect its scheduling after teardown. The `disposed`
+      // check inside each callback body is defense in depth for an event
+      // already queued at the moment unlisten() runs.
+      const unlistenOutput = await listen<{ id: string; b64: string }>("pty-output", (e) => {
+        if (disposed) return;
+        if (e.payload.id === id) writeBatcher.push(b64ToBytes(e.payload.b64));
+      });
+      if (disposed) {
+        unlistenOutput();
+        return;
+      }
+      unlisteners.push(unlistenOutput);
+
+      const unlistenExit = await listen<{ id: string }>("pty-exit", (e) => {
+        if (disposed) return;
+        if (e.payload.id !== id) return;
+        // Flush synchronously first — any output still waiting for its
+        // batched write must land before the exit banner, or the banner
+        // could render above the process's own final lines.
+        writeBatcher.flushNow();
+        term.write(`\r\n\x1b[90m${t("terminal.processExited")}\x1b[0m\r\n`);
+      });
+      if (disposed) {
+        unlistenExit();
+        return;
+      }
+      unlisteners.push(unlistenExit);
       term.onData((data) => void invoke("pty_write", { id, data }));
       fitNow(); // size the PTY to the pane if it's already laid out
       try {
@@ -133,6 +173,7 @@ export function TerminalPane({ id, cmd, args = [], cwd, fontSize = 12, onAgentSt
     return () => {
       disposed = true;
       if (resizeTimer) clearTimeout(resizeTimer);
+      writeBatcher.dispose();
       ro.disconnect();
       unlisteners.forEach((u) => u());
       void invoke("pty_kill", { id });

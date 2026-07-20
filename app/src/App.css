@@ -88,6 +88,26 @@ body,
   cursor: pointer;
   flex-shrink: 0;
 }
+.startup-outdated-banner-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+/* Deliberately unobtrusive — a way out for someone who really wants the
+   warning gone, not a peer action to "Update now". Two-class selector
+   (0,2,0) beats .startup-outdated-banner button's (0,1,1) without
+   !important. */
+.startup-outdated-banner .startup-outdated-banner-dismiss {
+  border: none;
+  padding: 0 4px;
+  font-size: 14px;
+  line-height: 1;
+  opacity: 0.6;
+}
+.startup-outdated-banner .startup-outdated-banner-dismiss:hover {
+  opacity: 1;
+}
 
 .startup-success-banner {
   display: flex;
@@ -160,21 +180,10 @@ select:focus {
   border-color: var(--accent);
 }
 
-/* + New menu */
+/* + New menu (collapsed-rail only — the expanded sidebar has its own
+   direct + buttons per section instead, see .section-add-btn) */
 .new-wrap {
   position: relative;
-}
-.new-btn {
-  background: var(--panel-2);
-  color: var(--fg);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: 4px 10px;
-  white-space: nowrap;
-  cursor: pointer;
-}
-.new-btn:hover {
-  border-color: var(--accent);
 }
 .new-menu {
   position: absolute;
@@ -620,9 +629,6 @@ body.resizing-row {
   width: auto;
   display: block;
 }
-.brand-row .new-wrap {
-  margin-left: auto;
-}
 .sidebar-head .brand {
   font-size: 15px;
 }
@@ -632,17 +638,17 @@ body.resizing-row {
 .team-status-rail {
   display: flex;
   flex-direction: column;
+  gap: 3px;
   border-bottom: 1px solid var(--border);
   padding: 3px 6px;
 }
 .team-status-row {
-  height: 20px;
   display: flex;
   align-items: center;
   justify-content: flex-start;
-  gap: 6px;
+  gap: 4px;
   width: 100%;
-  padding: 0 4px;
+  padding: 6px 4px;
   background: none;
   border: none;
   border-radius: 3px;
@@ -660,6 +666,13 @@ body.resizing-row {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.team-status-slot {
+  flex-shrink: 0;
+  width: 13px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
 .team-status-dot {
   flex: 0 0 auto;
   width: 7px;
@@ -670,6 +683,8 @@ body.resizing-row {
 .team-status-dot.status-blocked { background: #f7768e; }
 .team-status-dot.status-working { background: #e0af68; }
 .team-status-dot.status-idle { background: var(--green); }
+.team-status-dot.status-unknown { background: var(--green); }
+.team-status-dot.status-empty { background: var(--muted); }
 .collapsed-team-status {
   width: 28px;
   padding: 2px;
@@ -679,7 +694,7 @@ body.resizing-row {
 .collapsed-team-status .team-status-row {
   justify-content: center;
   gap: 0;
-  padding: 0;
+  padding: 6px 0;
 }
 .language-switcher {
   font-size: 11px;
@@ -694,6 +709,34 @@ body.resizing-row {
   letter-spacing: 0.6px;
   color: var(--muted);
   white-space: nowrap;
+}
+.sidebar-title-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.section-add-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  padding: 0;
+  border: none;
+  border-radius: 3px;
+  background: var(--panel-2);
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1;
+  cursor: pointer;
+}
+.section-add-btn:hover {
+  background: var(--accent);
+  color: #fff;
+}
+.section-add-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
 }
 .filter-actions {
   display: flex;
@@ -771,8 +814,10 @@ body.resizing-row {
 .agent-status-dot.status-working {
   background: #e0af68;
   animation: agent-status-pulse 1.2s ease-in-out infinite;
+  animation-delay: var(--pulse-delay, 0s);
 }
 .agent-status-dot.status-idle { background: var(--green); }
+.agent-status-dot.status-unknown { background: var(--green); }
 
 @keyframes agent-status-pulse {
   50% { opacity: 0.35; transform: scale(0.8); }
@@ -916,6 +961,27 @@ body.resizing-row {
 .tab-close:hover {
   opacity: 1;
   color: #f7768e;
+}
+/* The "+" free-shell tab, pinned right after the last real tab (not part
+   of teamWindows.map, so it isn't a .tab itself — no close button, no
+   active/rename state, just an icon button that opens a new one). */
+.tab-new-shell {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  align-self: flex-end;
+  width: 26px;
+  height: 26px;
+  margin-bottom: 1px;
+  background: none;
+  border: none;
+  border-radius: 6px 6px 0 0;
+  color: var(--muted);
+  cursor: pointer;
+}
+.tab-new-shell:hover {
+  color: var(--fg);
+  background: var(--panel-2);
 }
 
 /* Stage */
@@ -1224,6 +1290,7 @@ body.resizing-row {
   height: 7px;
   border-radius: 50%;
   animation: monitor-pulse 2.2s ease-in-out infinite;
+  animation-delay: var(--pulse-delay, 0s);
 }
 .monitor-dot.native::before {
   background: var(--green);

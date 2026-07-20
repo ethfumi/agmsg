@@ -9,6 +9,7 @@
   "startupError": {
     "installing": "agmsg wird installiert…",
     "installFailed": "agmsg konnte nicht installiert werden: {{error}}",
+    "loginShellFailed": "Die Login-Shell konnte nicht ermittelt werden: {{error}}",
     "loadTeamsFailed": "agmsg-Teams konnten nicht geladen werden: {{error}}. Ist agmsg unter ~/.agents/skills/agmsg installiert?",
     "coreOutdated": "Deine agmsg-CLI ist veraltet ({{installed}} < {{pinned}}) und funktioniert möglicherweise nicht richtig mit dieser App.",
     "versionUnknown": "unbekannt",
@@ -27,7 +28,12 @@
       "team": "Team…",
       "agent": "Agent…"
     },
+    "team": {
+      "title": "Team",
+      "new": "Neues Team"
+    },
     "title": "Agenten",
+    "newAgent": "Neuer Agent",
     "filter": {
       "all": "alle",
       "none": "keine"
@@ -37,7 +43,7 @@
       "titleRunning": "läuft bereits — klicken zum Fokussieren",
       "titleSpawn": "in einem PTY-Bereich starten",
       "noTypes": "—",
-      "emptyState": "Noch keine Agenten. ＋ Neu → Agent verwenden."
+      "emptyState": "Noch keine Agenten. Mit der ＋-Schaltfläche oben einen hinzufügen."
     },
     "user": {
       "title": "app-user in {{team}}"
@@ -45,7 +51,9 @@
   },
   "tabs": {
     "roomLabel": "# Team-Room",
-    "close": "×"
+    "close": "×",
+    "newShell": "Neuer Shell-Tab",
+    "shellLabel": "Shell"
   },
   "room": {
     "loadingMore": "Weitere werden geladen…",
@@ -150,6 +158,7 @@
     },
     "window": {
       "rename": "Umbenennen…",
+      "openShell": "Shell öffnen",
       "layout": "Layout ▸",
       "layoutVertical": "Vertikal",
       "layoutHorizontal": "Horizontal",
@@ -173,6 +182,10 @@
     "title": "Einstellungen",
     "terminalFontSize": {
       "label": "Terminal-Schriftgröße"
+    },
+    "timezone": {
+      "label": "Zeitzone",
+      "auto": "Automatisch ({{zone}})"
     }
   },
   "nativeMenu": {

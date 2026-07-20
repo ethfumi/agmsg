@@ -8,12 +8,14 @@ import {
   Minimize2,
   Minus,
   PanelLeftClose,
+  Plus,
   RectangleHorizontal,
   Settings,
   Users,
 } from "lucide-react";
 import { TerminalPane } from "./TerminalPane";
 import { aggregateTeamStatus, applyStateChange, type PaneStatusMap, type RawState } from "./agentStatus";
+import { AUTO_TIMEZONE, formatMessageTime, isValidTimeZone, resolveTimeZone } from "./time";
 import {
   AgentModal,
   AppUserModal,
@@ -54,6 +56,8 @@ import {
   type SourceMember,
   type SourceMessage,
 } from "./messageSources";
+import { PulseDot } from "./pulseSync";
+import { resolveActiveTab } from "./tabMemory";
 import "./App.css";
 
 export type Member = SourceMember;
@@ -63,7 +67,7 @@ type SourceHistory = {
   latestId?: string;
   hasMore: boolean;
 };
-type Pane = {
+export type Pane = {
   id: string;
   label: string;
   cmd: string;
@@ -74,12 +78,18 @@ type Pane = {
    *  False for actas-booted types with no monitor of their own (codex,
    *  grok-build, hermes, ...): the app's stdin-inject IS their only delivery. */
   native: boolean;
+  /** A free login shell (the "+" tab, or a tab's "Open shell" context menu
+   *  item) — unattached to any agent. Drives the sidebar-click "spawn beside
+   *  the shell instead of a new tab" behavior below: it has to be an
+   *  explicit flag rather than inferred from `cmd`, since `cmd` is
+   *  whatever login_shell resolved (zsh/bash/fish/...), not a fixed string. */
+  shell?: boolean;
 };
 // A tab. Holds one or more panes, arranged as a binary split tree (see
 // paneTree.ts) — draggable dividers and directional split/swap drag-drop
 // (issue #317) both need real nested structure, which a flat list + layout
 // enum couldn't represent (see the design doc on that issue for why).
-type Window = {
+export type Window = {
   id: string;
   root: SplitNode;
   /** User-set tab name (Rename); falls back to the joined pane labels. */
@@ -97,6 +107,52 @@ type Window = {
 // drags or split-drops produced and rebuilds a fresh tree matching the
 // preset; it is NOT a persisted mode the window stays locked into.
 type PaneLayout = "vertical" | "horizontal" | "tile";
+// What Rust's login_shell resolved (see lib.rs) — the user's actual login
+// shell binary plus the flags to make it behave like one (source profile,
+// interactive prompt), for the free-shell "+" tab. `home` is the $HOME
+// fallback used when the current team has no project dir configured.
+export type LoginShellInfo = { cmd: string; args: string[]; home: string };
+
+// Builds a free-shell Pane from Rust's resolved login shell — or null if
+// it hasn't resolved (yet, or ever). Deliberately has NO "bash" guess-
+// fallback: an earlier version defaulted to bash when `info` was still
+// unresolved, which raced the mount-effect fetch (app just launched, user
+// immediately hits "+") — broken on Windows (no bash), and not the user's
+// actual login shell even on unix (co1 review, PR #431). Pure so the
+// no-fallback contract is unit-testable without mounting the app.
+export function shellPaneFrom(info: LoginShellInfo | null, id: string, label: string, cwd: string | undefined): Pane | null {
+  if (!info) return null;
+  return { id, label, cmd: info.cmd, args: info.args, cwd, native: false, shell: true };
+}
+
+// Whether openShellTab's new window should still be committed after its
+// getLoginShell await — false if the user switched teams while it was in
+// flight. Committing anyway would silently add a window under the stale
+// team (hidden — only the current team's windows render) while `active`
+// pointed at it (co1, PR #431).
+export function shellTabStillValid(currentTeam: string, requestedTeam: string): boolean {
+  return currentTeam === requestedTeam;
+}
+
+// Whether openShellInWindow's target tab is still a valid split target
+// after its getLoginShell await — false if the user closed it (no window
+// references it, and `active` would point at a nonexistent id), OR just
+// switched teams while it was in flight: the target window can still exist
+// but now belong to the team the user navigated away from, in which case
+// splitting into it and setting `active` there produces the same
+// hidden-active bug openShellTab's shellTabStillValid guards against — a
+// window's `team` never changes after creation, so if the current team no
+// longer matches `requestedTeam` the window can't be a live tab regardless
+// of whether it's still present in `windows` (co1, PR #431).
+export function shellSplitStillValid(
+  windows: ReadonlyArray<Pick<Window, "id" | "team">>,
+  windowId: string,
+  currentTeam: string,
+  requestedTeam: string,
+): boolean {
+  if (currentTeam !== requestedTeam) return false;
+  return windows.some((w) => w.id === windowId && w.team === requestedTeam);
+}
 // A pane being dragged, and where within the target pane it's hovering —
 // drives both the drop classification (paneTree's classifyDrop) and the
 // half-occupied preview highlight (see dropPreview below). null while
@@ -138,6 +194,10 @@ const DEFAULT_TERMINAL_FONT_SIZE = 12;
 // the chat's "Add one" link, so a user who dismisses the auto-prompt once
 // shouldn't be re-asked on every future team switch.
 const SUPPRESS_APPUSER_PROMPT_KEY = "agmsg-app-suppress-appuser-prompt";
+// Persists the Settings modal's timezone choice (see time.ts) — defaults to
+// AUTO_TIMEZONE, which tracks the OS timezone live rather than freezing
+// whatever was detected at first launch.
+const TIMEZONE_KEY = "agmsg-app-timezone";
 // Custom drag-and-drop MIME type for pane-swap drags (see PANE_DRAG_MIME
 // usages below) — a made-up type, not text/plain, so a stray OS file drag
 // or an unrelated drag elsewhere on the page never accidentally matches a
@@ -145,6 +205,19 @@ const SUPPRESS_APPUSER_PROMPT_KEY = "agmsg-app-suppress-appuser-prompt";
 const PANE_DRAG_MIME = "application/x-agmsg-pane";
 // A spawnable agent type discovered from agmsg's type registry.
 export type AgentType = { name: string; cli: string; options: string[] };
+
+// Whether the outdated-CLI banner should render. A pure function (rather
+// than an inline JSX condition) purely so it's unit-testable — pinning down
+// that "Update now" already in flight (updatingCore) and a session-only ×
+// dismiss both independently suppress the banner, on top of the base
+// coreOutdated !== null check.
+export function shouldShowOutdatedBanner<T>(
+  coreOutdated: T,
+  updatingCore: boolean,
+  dismissed: boolean,
+): coreOutdated is NonNullable<T> {
+  return coreOutdated != null && !updatingCore && !dismissed;
+}
 
 export default function App() {
   const { t } = useTranslation();
@@ -162,6 +235,11 @@ export default function App() {
   // install still passes agmsg_is_installed(), so this is a separate check.
   // Never updated automatically: only ever from the user clicking Update.
   const [coreOutdated, setCoreOutdated] = useState<{ installed: string | null; pinned: string } | null>(null);
+  // The outdated banner's own × dismiss — deliberately session-only, not
+  // persisted (no localStorage key): a user who dismisses it once still
+  // hasn't actually updated the CLI, so the warning should come back on the
+  // next launch rather than staying silenced forever.
+  const [coreOutdatedDismissed, setCoreOutdatedDismissed] = useState(false);
   const [updatingCore, setUpdatingCore] = useState(false);
   // The version just updated to, shown as a confirmation banner — Update now
   // otherwise completes silently (the outdated banner just disappears),
@@ -176,7 +254,15 @@ export default function App() {
   const [panes, setPanes] = useState<Pane[]>([]);
   const [paneStatus, setPaneStatus] = useState<PaneStatusMap>({});
   const [windows, setWindows] = useState<Window[]>([]);
+  const [loginShell, setLoginShell] = useState<LoginShellInfo | null>(null);
   const [active, setActive] = useState<string>("room");
+  // Remembers which tab was active on each team, so switching back to a
+  // team you were already on lands where you left it instead of always
+  // resetting to Team Room (see the team-change layout effect below).
+  // Session-only (not persisted) — a ref, since it's write-on-leave/
+  // read-on-enter bookkeeping that never needs to trigger a render itself.
+  const lastActiveTabByTeam = useRef<Record<string, string>>({});
+  const prevTeamRef = useRef<string>("");
   const [target, setTarget] = useState<string>("");
   const [draft, setDraft] = useState<string>("");
   const [modal, setModal] = useState<Modal>(null);
@@ -195,6 +281,16 @@ export default function App() {
     return Number.isFinite(stored) && stored >= MIN_TERMINAL_FONT_SIZE && stored <= MAX_TERMINAL_FONT_SIZE
       ? stored
       : DEFAULT_TERMINAL_FONT_SIZE;
+  });
+  // Timezone used to display chat/team-room timestamps (see time.ts and
+  // TIMEZONE_KEY) — "auto" (the default) tracks the OS timezone live. A
+  // corrupted/no-longer-recognized stored zone falls back to "auto" here
+  // too, so the Settings <select> always has a matching option instead of
+  // rendering blank.
+  const [timezone, setTimezone] = useState(() => {
+    const stored = localStorage.getItem(TIMEZONE_KEY);
+    if (!stored || stored === AUTO_TIMEZONE) return AUTO_TIMEZONE;
+    return isValidTimeZone(stored) ? stored : AUTO_TIMEZONE;
   });
   // Collapses the team sidebar to an icon-only rail so panes get more width.
   // Persisted across restarts (see SIDEBAR_COLLAPSED_KEY) — spawning/
@@ -367,6 +463,12 @@ export default function App() {
   panesRef.current = panes;
   const windowsRef = useRef<Window[]>([]);
   windowsRef.current = windows;
+  // The stale-context guard openShellTab/openShellInWindow re-check after
+  // their getLoginShell await (see below) — a real gap now that login_shell
+  // resolution can take real time, during which the user can switch teams
+  // or close the target tab (co1, PR #431).
+  const teamRef = useRef<string>("");
+  teamRef.current = team;
   const applyAgentState = useCallback((paneId: string, state: RawState) => {
     setPaneStatus((current) => applyStateChange(current, paneId, state));
   }, []);
@@ -507,6 +609,40 @@ export default function App() {
     invoke<string>("agmsg_command_name").then(setCmdName).catch(() => {});
   }, []);
 
+  // What to spawn for the free-shell "+" tab — the user's actual login
+  // shell (respecting $SHELL), not a hardcoded one. Resolved once in Rust
+  // (lib.rs's login_shell) since the webview has no reliable way to read
+  // $SHELL itself (unset for a Finder-launched process — see
+  // import_login_shell_path's doc comment). Just a warm-cache prefetch —
+  // getLoginShell (below) is what open-shell call sites actually await, so
+  // a click landing before this resolves still gets the real shell instead
+  // of racing to a fallback.
+  useEffect(() => {
+    invoke<LoginShellInfo>("login_shell")
+      .then(setLoginShell)
+      .catch((err) => {
+        console.error(err);
+      });
+  }, []);
+
+  // Resolves login_shell, awaiting Rust if the mount-effect prefetch above
+  // hasn't landed yet (real race: app just launched, user immediately hits
+  // "+" or "Open shell"). Returns null on failure — callers must NOT
+  // fall back to a guessed shell (e.g. "bash"): broken on Windows, and not
+  // the user's actual login shell even on unix (co1 review, PR #431).
+  const getLoginShell = useCallback(async (): Promise<LoginShellInfo | null> => {
+    if (loginShell) return loginShell;
+    try {
+      const info = await invoke<LoginShellInfo>("login_shell");
+      setLoginShell(info);
+      return info;
+    } catch (err) {
+      console.error(err);
+      setStartupError(t("startupError.loginShellFailed", { error: String(err) }));
+      return null;
+    }
+  }, [loginShell, t]);
+
   // showTeamRoom/showUserChat are already correctly seeded from localStorage
   // by their useState initializers above — this effect's only job is to
   // PUSH that initial value into Rust (set_team_room_visible/
@@ -564,6 +700,11 @@ export default function App() {
   useEffect(() => {
     localStorage.setItem(TERMINAL_FONT_SIZE_KEY, String(terminalFontSize));
   }, [terminalFontSize]);
+  useEffect(() => {
+    localStorage.setItem(TIMEZONE_KEY, timezone);
+  }, [timezone]);
+  // Resolved once per render for both message-time display sites below.
+  const effectiveTimeZone = resolveTimeZone(timezone);
 
   // Spawnable agent types (for the Add-agent type picker). spawnMember
   // re-fetches this itself right before spawning — see there for why.
@@ -617,13 +758,29 @@ export default function App() {
   }, [loadSources, loadTeams, t]);
 
   // Tabs are per-team (see the Window type), so switching teams also swaps
-  // the whole visible tab set — land on the team room rather than leaving
+  // the whole visible tab set — restore whichever tab was active the last
+  // time this team was selected (lastActiveTabByTeam), rather than leaving
   // `active` pointing at a now-hidden tab from the previous team (its PTY
-  // keeps running; the tab just isn't shown here). A layout effect (not a
+  // keeps running; the tab just isn't shown here). Falls back to Team Room
+  // (or the team's first window, if Team Room is currently hidden — see
+  // resolveActiveTab) for a team visited for the first time this session,
+  // or if the remembered tab is no longer usable. A layout effect (not a
   // regular one) so this resolves before paint — otherwise the old team's
   // pane, still technically "active" for one frame, would flash visible.
   useLayoutEffect(() => {
-    if (team) setActive("room");
+    if (!team) return;
+    // `active`/`windows`/`showTeamRoom` are read via closure, not deps —
+    // this should only re-run when `team` itself changes, using whatever
+    // they're currently set to at that moment (the outgoing team's real
+    // last-active tab, the freshest window list, and the current Team Room
+    // visibility to validate the incoming team's remembered tab against). A
+    // mid-visit showTeamRoom toggle is handled separately (see the "if Show
+    // Team Room gets switched off" effect below).
+    if (prevTeamRef.current) lastActiveTabByTeam.current[prevTeamRef.current] = active;
+    const remembered = lastActiveTabByTeam.current[team];
+    const openWindowIds = windows.filter((w) => w.team === team).map((w) => w.id);
+    setActive(resolveActiveTab(remembered, showTeamRoom, openWindowIds));
+    prevTeamRef.current = team;
   }, [team]);
 
   // Remember the selected team across restarts (see LAST_TEAM_KEY above).
@@ -827,18 +984,7 @@ export default function App() {
     const stateListener = listen<{ id: string; state: RawState }>("agent-state", (event) => {
       applyAgentState(event.payload.id, event.payload.state);
     });
-    const exitListener = listen<{ id: string }>("pty-exit", (event) => {
-      setPaneStatus((current) => {
-        if (!(event.payload.id in current)) return current;
-        const next = { ...current };
-        delete next[event.payload.id];
-        return next;
-      });
-    });
-    return () => {
-      void stateListener.then((unlisten) => unlisten());
-      void exitListener.then((unlisten) => unlisten());
-    };
+    return () => void stateListener.then((unlisten) => unlisten());
   }, [applyAgentState]);
 
   // Load-more-on-scroll-up: fetch the page older than the currently-oldest
@@ -1026,6 +1172,28 @@ export default function App() {
     [detachPane],
   );
 
+  useEffect(() => {
+    const p = listen<{ id: string }>("pty-exit", (e) => {
+      setPaneStatus((current) => {
+        if (!(e.payload.id in current)) return current;
+        const next = { ...current };
+        delete next[e.payload.id];
+        return next;
+      });
+      // A free-shell pane has no "still running, look at the error" state
+      // worth preserving the way an agent's crash banner does
+      // (TerminalPane's own pty-exit listener writes that inline) — its own
+      // exit/Ctrl-D is a deliberate "done here" (koit), so the pane (and its
+      // tab, if it was the last one) just goes away instead of sitting on a
+      // dead prompt. Agent panes are untouched — this only fires for panes
+      // flagged `shell`.
+      if (panesRef.current.find((pane) => pane.id === e.payload.id)?.shell) {
+        closeWindowPane(e.payload.id);
+      }
+    });
+    return () => void p.then((unlisten) => unlisten());
+  }, [closeWindowPane]);
+
   // Close a whole tab: kill every pane it holds.
   const closeWindow = useCallback((windowId: string) => {
     const w = windowsRef.current.find((x) => x.id === windowId);
@@ -1066,6 +1234,78 @@ export default function App() {
     },
     [detachPane, team],
   );
+
+  // A plain login shell pane, unattached to any agent (vim'ing a file,
+  // poking around — not agmsg's business). Awaits getLoginShell (see the
+  // mount-effect section above) rather than reading `loginShell` state
+  // directly — null means it's genuinely unresolved/unresolvable, at which
+  // point shellPaneFrom itself refuses to guess a fallback shell (co1, PR
+  // #431); getLoginShell has already surfaced startupError in that case, so
+  // callers just bail out with no pane. cwd defaults to the current team's
+  // project dir (teamProject) rather than wherever the shell would
+  // otherwise start — koit: re-cd'ing from $HOME every time is tedious —
+  // falling back to $HOME only when no project dir is configured. Shared by
+  // openShellTab (new tab) and openShellInWindow (split into an existing
+  // tab) below; both only ever act on the current team's tabs (windowMenu
+  // can only target a teamWindows entry), so teamProject is always the
+  // right project for either call site.
+  const buildShellPane = useCallback(async (): Promise<Pane | null> => {
+    const info = await getLoginShell();
+    return shellPaneFrom(info, `shell-${seq.current++}`, t("tabs.shellLabel"), teamProject || info?.home || undefined);
+  }, [getLoginShell, t, teamProject]);
+
+  // The "+" tab at the end of the tab bar. Same new-Pane-plus-new-Window
+  // shape as spawnMember's no-targetWindowId branch and moveToNewWindow
+  // above. buildShellPane's getLoginShell await is a real gap now (not just
+  // a microtask) — the user can switch teams while it's in flight, which
+  // would otherwise add the new window under the STALE `team` closed over
+  // at click time (hidden, since only the current team's windows render)
+  // while `active` still points at it (co1, PR #431). Bail out rather than
+  // create an orphaned, invisible tab if the team moved on.
+  const openShellTab = useCallback(async () => {
+    const requestedTeam = team;
+    const pane = await buildShellPane();
+    if (!pane || !shellTabStillValid(teamRef.current, requestedTeam)) return;
+    setPanes((prev) => [...prev, pane]);
+    const winId = `w-${seq.current++}`;
+    setWindows((prev) => [...prev, { id: winId, root: { kind: "leaf", paneId: pane.id }, team: requestedTeam }]);
+    setActive(winId);
+  }, [buildShellPane, team]);
+
+  // A tab's "Open shell" context-menu item — splits a shell pane in beside
+  // whatever's already in that tab. The symmetric counterpart of spawning an
+  // agent beside an open shell pane (see windowHasShellPane/spawnMember
+  // below): either direction, shell and agent end up split in the same tab.
+  // Same stale-context concern as openShellTab, in two shapes: the target
+  // tab can be closed while getLoginShell's await is in flight (orphaned
+  // pane, `active` pointing at a dead id), or the team can just switch
+  // while the window itself stays open — it's now a hidden tab under the
+  // team the user navigated away from, so splitting into it and activating
+  // it reproduces the same hidden-active bug (co1, PR #431).
+  const openShellInWindow = useCallback(
+    async (windowId: string) => {
+      const requestedTeam = team;
+      const pane = await buildShellPane();
+      if (!pane || !shellSplitStillValid(windowsRef.current, windowId, teamRef.current, requestedTeam)) return;
+      setPanes((prev) => [...prev, pane]);
+      setWindows((prev) =>
+        prev.map((w) => (w.id === windowId ? { ...w, root: insertAsNewLeaf(w.root, pane.id) } : w)),
+      );
+      setActive(windowId);
+    },
+    [buildShellPane, team],
+  );
+
+  // True when `windowId`'s tab currently has a free-shell pane in it — the
+  // signal spawnMember's sidebar-click site uses to decide "spawn this agent
+  // beside the shell in the same tab" (koit's design B) instead of the
+  // default "open a new tab".
+  const windowHasShellPane = useCallback((windowId: string) => {
+    const w = windowsRef.current.find((w) => w.id === windowId);
+    if (!w) return false;
+    const ids = leaves(w.root);
+    return panesRef.current.some((p) => ids.includes(p.id) && p.shell);
+  }, []);
 
   // Swap two panes' positions within the same window (tree shape unchanged
   // — no DOM remount, same as every other pane move in this file).
@@ -1452,7 +1692,7 @@ export default function App() {
           <span>{t("startupError.installing")}</span>
         </div>
       )}
-      {coreOutdated && !updatingCore && (
+      {shouldShowOutdatedBanner(coreOutdated, updatingCore, coreOutdatedDismissed) && (
         <div className="startup-outdated-banner">
           <span>
             {t("startupError.coreOutdated", {
@@ -1460,25 +1700,35 @@ export default function App() {
               pinned: coreOutdated.pinned,
             })}
           </span>
-          <button
-            onClick={async () => {
-              const targetVersion = coreOutdated.pinned;
-              setUpdatingCore(true);
-              try {
-                await invoke("agmsg_update_core");
-                setCoreOutdated(null);
-                setCoreUpdateSucceeded(targetVersion);
-                await loadTeams(sources);
-              } catch (err) {
-                console.error(err);
-                setStartupError(t("startupError.updateFailed", { error: String(err) }));
-              } finally {
-                setUpdatingCore(false);
-              }
-            }}
-          >
-            {t("startupError.updateNow")}
-          </button>
+          <div className="startup-outdated-banner-actions">
+            <button
+              onClick={async () => {
+                const targetVersion = coreOutdated.pinned;
+                setUpdatingCore(true);
+                try {
+                  await invoke("agmsg_update_core");
+                  setCoreOutdated(null);
+                  setCoreUpdateSucceeded(targetVersion);
+                  await loadTeams(sources);
+                } catch (err) {
+                  console.error(err);
+                  setStartupError(t("startupError.updateFailed", { error: String(err) }));
+                } finally {
+                  setUpdatingCore(false);
+                }
+              }}
+            >
+              {t("startupError.updateNow")}
+            </button>
+            <button
+              className="startup-outdated-banner-dismiss"
+              onClick={() => setCoreOutdatedDismissed(true)}
+              title={t("startupError.dismiss")}
+              aria-label={t("startupError.dismiss")}
+            >
+              ×
+            </button>
+          </div>
         </div>
       )}
       {updatingCore && (
@@ -1635,38 +1885,19 @@ export default function App() {
               <div className="sidebar-head" data-tauri-drag-region>
                 <div className="brand-row">
                   <img className="logo" src="/agmsg-logo.png" alt={t("sidebar.logoAlt")} />
-                  <div className="new-wrap" onClick={(e) => e.stopPropagation()}>
-                  <button className="new-btn" onClick={toggleNewMenu}>
-                    {t("sidebar.newMenu.trigger")}
-                  </button>
-                  {newMenu && (
-                    <div className="new-menu">
-                      <button
-                        onClick={() => {
-                          setNewMenu(false);
-                          setModal({ kind: "team", firstRun: false });
-                        }}
-                      >
-                        {t("sidebar.newMenu.team")}
-                      </button>
-                      <button
-                        disabled={!team}
-                        onClick={() => {
-                          setNewMenu(false);
-                          setModal({ kind: "agent" });
-                          // Refresh in case spawn-options.yaml or a new type
-                          // manifest showed up since app start.
-                          invoke<AgentType[]>("agmsg_spawnable_types")
-                            .then(setSpawnTypes)
-                            .catch(() => {});
-                        }}
-                      >
-                        {t("sidebar.newMenu.agent")}
-                      </button>
-                    </div>
-                  )}
-                  </div>
                 </div>
+              </div>
+              <div className="sidebar-title">
+                <span className="sidebar-title-label">
+                  {t("sidebar.team.title")}
+                  <button
+                    className="section-add-btn"
+                    title={t("sidebar.team.new")}
+                    onClick={() => setModal({ kind: "team", firstRun: false })}
+                  >
+                    +
+                  </button>
+                </span>
               </div>
               <div className="team-status-rail" aria-label="Open pane status">
                 {teams.map((teamName) => {
@@ -1678,14 +1909,33 @@ export default function App() {
                       title={`${teamName}: ${status} (open panes)`}
                       onClick={() => setTeam(teamName)}
                     >
-                      <span className={`team-status-dot status-${status}`} />
+                      <span className="team-status-slot">
+                        <span className={`team-status-dot status-${status}`} />
+                      </span>
                       <span className="team-status-name">{teamName}</span>
                     </button>
                   );
                 })}
               </div>
               <div className="sidebar-title">
-                <span>{t("sidebar.title")}</span>
+                <span className="sidebar-title-label">
+                  {t("sidebar.title")}
+                  <button
+                    className="section-add-btn"
+                    title={t("sidebar.newAgent")}
+                    disabled={!team}
+                    onClick={() => {
+                      setModal({ kind: "agent" });
+                      // Refresh in case spawn-options.yaml or a new type
+                      // manifest showed up since app start.
+                      invoke<AgentType[]>("agmsg_spawnable_types")
+                        .then(setSpawnTypes)
+                        .catch(() => {});
+                    }}
+                  >
+                    +
+                  </button>
+                </span>
                 {active === "room" && others.length > 0 && (
                   <span className="filter-actions">
                     <button onClick={selectAllMembers}>{t("sidebar.filter.all")}</button>
@@ -1735,14 +1985,22 @@ export default function App() {
                         />
                       ) : (
                         <span className="member-check-slot">
-                          {status && <span className={`agent-status-dot status-${status}`} title={status} />}
+                          {status && (
+                            <PulseDot
+                              periodMs={1200}
+                              active={status === "working"}
+                              className={`agent-status-dot status-${status}`}
+                              title={status}
+                            />
+                          )}
                         </span>
                       )}
                       <button
                         className="member"
                         disabled={m.read_only}
                         onClick={() => {
-                          if (!m.read_only) void spawnMember(m);
+                          if (!m.read_only)
+                            void spawnMember(m, windowHasShellPane(active) ? active : undefined);
                         }}
                         title={
                           m.read_only
@@ -1871,6 +2129,14 @@ export default function App() {
                 </button>
               </span>
             ))}
+            <button
+              className="tab-new-shell"
+              title={t("tabs.newShell")}
+              aria-label={t("tabs.newShell")}
+              onClick={openShellTab}
+            >
+              <Plus size={13} />
+            </button>
             {/* Tabs are all clickable buttons, so they eat the drag region
                 the <nav> itself claims — this dedicated strip is always
                 empty and always draggable, regardless of tab count. */}
@@ -1917,7 +2183,7 @@ export default function App() {
                     {sources.length > 1 && (
                       <span className="source-badge">{g.source_label}</span>
                     )}
-                    <span className="grp-time">{g.items[0].created_at.slice(11, 19)}</span>
+                    <span className="grp-time">{formatMessageTime(g.items[0].created_at, effectiveTimeZone)}</span>
                   </div>
                   {g.items.map((m) => (
                     <div className="grp-body" key={messageKey(m)}>
@@ -2081,13 +2347,16 @@ export default function App() {
                     >
                       {p.label}
                     </button>
-                    <span className={p.native ? "monitor-dot native" : "monitor-dot app"}>
+                    <PulseDot
+                      periodMs={2200}
+                      className={p.native ? "monitor-dot native" : "monitor-dot app"}
+                    >
                       <span className="monitor-tip">
                         {p.native
                           ? t("pane.monitorTip.native")
                           : t("pane.monitorTip.app")}
                       </span>
-                    </span>
+                    </PulseDot>
                     <button
                       className="pane-header-close"
                       onClick={() => setModal({ kind: "closePane", paneId: p.id })}
@@ -2190,7 +2459,7 @@ export default function App() {
               <div className="appuser-chat" ref={chatRef} onClick={() => composerInputRef.current?.focus()}>
                 {myThread.map((m) => (
                   <div className={m.from === appUser ? "chat-line out" : "chat-line in"} key={m.id}>
-                    <span className="chat-time">{m.created_at.slice(11, 19)}</span>
+                    <span className="chat-time">{formatMessageTime(m.created_at, effectiveTimeZone)}</span>
                     <span className="chat-peer">
                       {m.from === appUser
                         ? t("chat.peer.to", { to: m.to })
@@ -2310,6 +2579,8 @@ export default function App() {
           onClose={() => setModal(null)}
           terminalFontSize={terminalFontSize}
           onTerminalFontSizeChange={setTerminalFontSize}
+          timezone={timezone}
+          onTimezoneChange={setTimezone}
         />
       )}
       {modal?.kind === "closeWindow" &&
@@ -2548,6 +2819,14 @@ export default function App() {
                 }}
               >
                 {t("ctxMenu.window.rename")}
+              </button>
+              <button
+                onClick={() => {
+                  openShellInWindow(windowMenu.windowId);
+                  setWindowMenu(null);
+                }}
+              >
+                {t("ctxMenu.window.openShell")}
               </button>
               <div className="submenu-trigger">
                 <span className="submenu-label">{t("ctxMenu.window.layout")}</span>

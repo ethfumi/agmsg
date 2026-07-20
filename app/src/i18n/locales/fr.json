@@ -9,6 +9,7 @@
   "startupError": {
     "installing": "Installation d'agmsg…",
     "installFailed": "Impossible d'installer agmsg : {{error}}",
+    "loginShellFailed": "Impossible de déterminer votre shell de connexion : {{error}}",
     "loadTeamsFailed": "Impossible de charger les équipes agmsg : {{error}}. agmsg est-il installé dans ~/.agents/skills/agmsg ?",
     "coreOutdated": "Ton CLI agmsg est obsolète ({{installed}} < {{pinned}}) et pourrait ne pas fonctionner correctement avec cette app.",
     "versionUnknown": "inconnue",
@@ -27,7 +28,12 @@
       "team": "Équipe…",
       "agent": "Agent…"
     },
+    "team": {
+      "title": "Équipe",
+      "new": "Nouvelle équipe"
+    },
     "title": "Agents",
+    "newAgent": "Nouvel agent",
     "filter": {
       "all": "tous",
       "none": "aucun"
@@ -37,7 +43,7 @@
       "titleRunning": "déjà en cours — cliquer pour afficher",
       "titleSpawn": "démarrer dans un panneau PTY",
       "noTypes": "—",
-      "emptyState": "Aucun agent pour l'instant. Utilisez ＋ Nouveau → Agent."
+      "emptyState": "Aucun agent pour l'instant. Utilisez le bouton ＋ ci-dessus pour en ajouter un."
     },
     "user": {
       "title": "app-user dans {{team}}"
@@ -45,7 +51,9 @@
   },
   "tabs": {
     "roomLabel": "# salle d'équipe",
-    "close": "×"
+    "close": "×",
+    "newShell": "Nouvel onglet shell",
+    "shellLabel": "Shell"
   },
   "room": {
     "loadingMore": "Chargement…",
@@ -150,6 +158,7 @@
     },
     "window": {
       "rename": "Renommer…",
+      "openShell": "Ouvrir un shell",
       "layout": "Disposition ▸",
       "layoutVertical": "Vertical",
       "layoutHorizontal": "Horizontal",
@@ -173,6 +182,10 @@
     "title": "Paramètres",
     "terminalFontSize": {
       "label": "Taille de police du terminal"
+    },
+    "timezone": {
+      "label": "Fuseau horaire",
+      "auto": "Auto ({{zone}})"
     }
   },
   "nativeMenu": {
